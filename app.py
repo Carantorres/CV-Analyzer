@@ -347,9 +347,22 @@ if uploaded_files:
         )
         
         # Display the interactive plot on the web page
-        st.plotly_chart(fig, use_container_width=True)
+        # --- CONFIGURACIÓN PARA DESCARGA EN ALTA DEFINICIÓN (300 DPI) ---
+        plot_config = {
+            'toImageButtonOptions': {
+                'format': 'png', 
+                'filename': f'CV_Plot_{file.name}', # Nombra el archivo automáticamente
+                'height': 600,
+                'width': 1000,
+                'scale': 4 # Multiplica los píxeles x4 para lograr calidad de publicación
+            }
+        }
+
+        # Display the interactive plot on the web page
+        st.plotly_chart(fig, use_container_width=True, config=plot_config)
         
         # Display the data table
         if results_list:
             st.write("**Recommended Operating Ranges:**")
+
             st.dataframe(pd.DataFrame(results_list), use_container_width=True)
