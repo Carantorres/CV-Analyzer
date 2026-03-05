@@ -367,13 +367,13 @@ if uploaded_files:
         fig.update_layout(
             xaxis_title="E (V vs Ref.)",
             yaxis_title="Im (A)",
+            # Eliminado: font=dict(color="white"). Ahora Streamlit se encarga automáticamente.
             legend=dict(
-                font=dict(color="white"), 
                 yanchor="top", 
                 y=0.99, 
                 xanchor="left", 
                 x=0.01, 
-                bgcolor="rgba(0,0,0,0)"
+                bgcolor="rgba(0,0,0,0)" # Fondo totalmente transparente
             )
         )
         
