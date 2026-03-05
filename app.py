@@ -1,5 +1,6 @@
 import os
 import re
+import io
 from typing import Dict, List, Tuple
 import numpy as np
 import pandas as pd
@@ -208,6 +209,22 @@ def recommend_operating_ranges_for_curve(df_curve, baseline_E_window=0.20, smoot
 
     return {"N_points": N, "noisy_intervals_E": noisy_intervals, "E_cut_cathodic_V": E_cut, "recommended_noise_safe_V": noise_safe, "recommended_reduction_only_V": red_range}
 
+def convert_df_to_excel(curves_list: List[Tuple[str, pd.DataFrame]]) -> bytes:
+    """Convierte las curvas extraídas en un archivo Excel (bytes), separando cada curva en una hoja."""
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        for cid, df in curves_list:
+            Ecol = "Vf" if "Vf" in df.columns else ("Vu" if "Vu" in df.columns else None)
+            if Ecol is None or "Im" not in df.columns:
+                continue
+            # Limpiamos datos vacíos antes de exportar
+            clean_df = df.replace([np.inf, -np.inf], np.nan).dropna(subset=[Ecol, "Im"])
+            # Solo exportar si tiene suficientes puntos (evita curvas basura de 1 punto)
+            if len(clean_df) >= 10:
+                clean_df.to_excel(writer, index=False, sheet_name=cid)
+    processed_data = output.getvalue()
+    return processed_data
+
 
 # ============================================================
 # APP LOGIC
@@ -241,7 +258,7 @@ if uploaded_files:
         st.header("🔄 Rearrange Plots")
         st.markdown("Drag and drop to reorder:")
         
-        # This will now perfectly render inside the left menu!
+        # This will perfectly render inside the left menu
         sorted_display_names = sort_items(st.session_state.file_order)
         st.session_state.file_order = sorted_display_names
         
@@ -273,11 +290,25 @@ if uploaded_files:
         file = file_dict[file_name]
         
         st.markdown("---")
-        st.subheader(f"📄 Data for: {file.name}")
         
         # Read the file text
         raw_text = file.getvalue().decode("utf-8", errors="replace")
         meta, curves = parse_gamry_dta_multi_curve(raw_text)
+
+        # --- TÍTULO Y BOTÓN DE EXCEL EN LA MISMA LÍNEA ---
+        col_title, col_btn = st.columns([4, 1])
+        with col_title:
+            st.subheader(f"📄 Data for: {file.name}")
+        with col_btn:
+            excel_data = convert_df_to_excel(curves)
+            st.download_button(
+                label="📥 Export to Excel",
+                help=f"Export curve data to Excel from {file.name}",
+                data=excel_data,
+                file_name=f"{file.name.replace('.DTA', '')}_Data.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key=f"dl_{file.name}" # Llave única para el botón de cada archivo
+            )
         
         # --- EXTRACT EXPERIMENT LIMITS ---
         vinit = _to_float(meta.get("VINIT"))
@@ -314,7 +345,7 @@ if uploaded_files:
                 x=dd[Ecol], 
                 y=dd["Im"], 
                 mode='lines',
-                name=cid, 
+                name=cid, # Will display as "Curve 1", etc.
                 line=dict(color=line_color, width=2)
             ))
             
@@ -346,23 +377,21 @@ if uploaded_files:
             )
         )
         
-        # Display the interactive plot on the web page
         # --- CONFIGURACIÓN PARA DESCARGA EN ALTA DEFINICIÓN (300 DPI) ---
         plot_config = {
             'toImageButtonOptions': {
                 'format': 'png', 
-                'filename': f'CV_Plot_{file.name}', # Nombra el archivo automáticamente
+                'filename': f"CV_Plot_{file.name.replace('.DTA', '')}", 
                 'height': 600,
                 'width': 1000,
                 'scale': 4 # Multiplica los píxeles x4 para lograr calidad de publicación
             }
         }
-
+        
         # Display the interactive plot on the web page
         st.plotly_chart(fig, use_container_width=True, config=plot_config)
         
         # Display the data table
         if results_list:
             st.write("**Recommended Operating Ranges:**")
-
             st.dataframe(pd.DataFrame(results_list), use_container_width=True)
