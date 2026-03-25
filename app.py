@@ -306,13 +306,18 @@ def parse_biologic_mpt(raw: str):
 
     df = df.replace([np.inf, -np.inf], np.nan).dropna(how="all").reset_index(drop=True)
 
+    # ========================================================
+    # DETECCIÓN DE COLUMNAS E IDENTIFICACIÓN DE CICLOS
+    # ========================================================
     col_map = {}
     for c in df.columns:
         cl = c.lower()
         if "ewe" in cl or "potential" in cl or "voltage" in cl:
             col_map[c] = "Vf"
-        if "<i>" in cl or "current" in cl or "i/ma" in cl:
+        elif "<i>" in cl or "current" in cl or "i/ma" in cl:
             col_map[c] = "Im"
+        elif cl == "cycle number" or cl == "cycle":
+            col_map[c] = "Cycle"
 
     df = df.rename(columns=col_map)
 
@@ -322,7 +327,19 @@ def parse_biologic_mpt(raw: str):
     if df["Im"].abs().max() > 1:
         df["Im"] = df["Im"] / 1000
 
-    return meta, [("Curve 1", df)]
+    # Dividir datos basado en número de ciclo
+    curves = []
+    if "Cycle" in df.columns:
+        unique_cycles = sorted(df["Cycle"].dropna().unique())
+        for cyc in unique_cycles:
+            df_cyc = df[df["Cycle"] == cyc].copy()
+            if len(df_cyc) > 0:
+                c_num = int(cyc) if float(cyc).is_integer() else cyc
+                curves.append((f"Cycle {c_num}", df_cyc.reset_index(drop=True)))
+    else:
+        curves.append(("Curve 1", df))
+
+    return meta, curves
 
 # ============================================================
 # EXPORT
