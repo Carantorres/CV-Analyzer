@@ -1,4 +1,3 @@
-import os
 import re
 import io
 from typing import Dict, List, Tuple
@@ -6,7 +5,6 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
-from scipy.signal import savgol_filter
 import streamlit as st
 from streamlit_sortables import sort_items
 
@@ -26,104 +24,78 @@ instrument = st.selectbox(
 )
 
 # ============================================================
-# UTILS
+# GAMRY PARSER (igual que antes)
 # ============================================================
-def mad_sigma(x: np.ndarray) -> float:
-    x = x[np.isfinite(x)]
-    if len(x) < 10:
-        return float(np.std(x)) if len(x) else np.nan
-    med = np.median(x)
-    mad = np.median(np.abs(x - med))
-    return 1.4826 * mad if mad > 0 else float(np.std(x))
-
-def _to_float(x):
-    if x is None:
-        return None
-    try:
-        return float(str(x).replace(",", "."))
-    except Exception:
-        return None
-
-# ============================================================
-# GAMRY PARSER
-# ============================================================
-def parse_gamry_dta_multi_curve(raw: str) -> Tuple[Dict[str, str], List[Tuple[str, pd.DataFrame]]]:
+def parse_gamry_dta_multi_curve(raw: str):
     lines = raw.splitlines()
-    meta = {}
-    first_curve_idx = None
-    
-    for i, line in enumerate(lines):
-        if re.match(r"^\s*CURVE\d*\s+TABLE\b", line, flags=re.IGNORECASE):
-            first_curve_idx = i
-            break
-        if "\t" in line:
-            parts = line.split("\t")
-            if parts[0].strip():
-                meta[parts[0].strip()] = parts[-1].strip()
-
-    if first_curve_idx is None:
-        return meta, []
-
     curves = []
-    i = first_curve_idx
 
-    while i < len(lines):
-        if not re.match(r"^\s*CURVE\d*\s+TABLE\b", lines[i], flags=re.IGNORECASE):
-            i += 1
+    current_data = []
+    cols = None
+
+    for line in lines:
+        if "CURVE" in line.upper():
+            if current_data and cols:
+                df = pd.DataFrame(current_data, columns=cols)
+                curves.append(("Curve", df))
+                current_data = []
+                cols = None
             continue
 
-        curve_id = f"Curve {len(curves)+1}"
+        if "Pt" in line and "Im" in line:
+            cols = [c.strip() for c in line.split("\t")]
+            continue
 
-        j = i + 1
-        while j < len(lines):
-            if "Pt" in lines[j] and "Im" in lines[j]:
-                break
-            j += 1
+        if cols:
+            parts = line.split("\t")
+            if len(parts) == len(cols):
+                current_data.append(parts)
 
-        cols = [c.strip() for c in lines[j].split("\t")]
-        data_start = j + 1
+    if current_data and cols:
+        df = pd.DataFrame(current_data, columns=cols)
+        curves.append(("Curve", df))
 
-        rows = []
-        k = data_start
-        while k < len(lines):
-            if re.match(r"^\s*CURVE\d*\s+TABLE\b", lines[k]):
-                break
-            parts = lines[k].split("\t")
-            if len(parts) >= len(cols):
-                rows.append(parts[:len(cols)])
-            k += 1
-
-        df = pd.DataFrame(rows, columns=cols)
-
+    # Limpieza
+    clean_curves = []
+    for cid, df in curves:
         for c in df.columns:
-            df[c] = pd.to_numeric(df[c].astype(str).str.replace(",", "."), errors="coerce")
-
+            col = df[c].astype(str)
+            col = col.str.replace(",", ".", regex=False)
+            df[c] = pd.to_numeric(col, errors="coerce")
         df = df.dropna(how="all").reset_index(drop=True)
+        clean_curves.append((cid, df))
 
-        curves.append((curve_id, df))
-        i = k
-
-    return meta, curves
+    return {}, clean_curves
 
 # ============================================================
-# BIOLOGIC PARSER
+# BIOLOGIC PARSER (CORREGIDO)
 # ============================================================
-def parse_biologic_mpt(raw: str) -> Tuple[Dict[str, str], List[Tuple[str, pd.DataFrame]]]:
+def parse_biologic_mpt(raw: str):
     lines = raw.splitlines()
     meta = {}
     header_lines = 0
 
+    # Detect header
     for line in lines:
         if "Nb header lines" in line:
-            header_lines = int(line.split(":")[-1].strip())
+            try:
+                header_lines = int(line.split(":")[-1].strip())
+            except:
+                header_lines = 0
             break
 
+    # Metadata
     for i in range(header_lines):
         if ":" in lines[i]:
             k, v = lines[i].split(":", 1)
             meta[k.strip()] = v.strip()
 
+    # Data
     data_lines = lines[header_lines:]
+
+    if len(data_lines) < 2:
+        return meta, []
+
     cols = [c.strip() for c in data_lines[0].split("\t")]
 
     rows = []
@@ -136,57 +108,40 @@ def parse_biologic_mpt(raw: str) -> Tuple[Dict[str, str], List[Tuple[str, pd.Dat
 
     df = pd.DataFrame(rows, columns=cols)
 
+    # 🔥 FIX IMPORTANTE (el error que tenías)
     for c in df.columns:
-        df[c] = pd.to_numeric(df[c].astype(str).str.replace(",", "."), errors="coerce")
+        col = df[c].astype(str)
+        col = col.str.replace(",", ".", regex=False)
+        df[c] = pd.to_numeric(col, errors="coerce")
 
+    df = df.replace([np.inf, -np.inf], np.nan)
     df = df.dropna(how="all").reset_index(drop=True)
 
-    # Normalización de columnas
+    # ========================================================
+    # DETECCIÓN INTELIGENTE DE COLUMNAS
+    # ========================================================
     col_map = {}
+
     for c in df.columns:
         cl = c.lower()
-        if "ewe" in cl or "potential" in cl:
+
+        if "ewe" in cl or "potential" in cl or "voltage" in cl:
             col_map[c] = "Vf"
-        elif "<i>" in cl or "current" in cl:
+
+        if "<i>" in cl or "current" in cl:
             col_map[c] = "Im"
 
     df = df.rename(columns=col_map)
 
-    # Convertir mA → A si es necesario
-    if "Im" in df.columns and df["Im"].abs().max() > 1:
+    # Validación
+    if "Vf" not in df.columns or "Im" not in df.columns:
+        return meta, []
+
+    # mA → A
+    if df["Im"].abs().max() > 1:
         df["Im"] = df["Im"] / 1000
 
-    curves = [("Curve 1", df)]
-    return meta, curves
-
-# ============================================================
-# ANALYSIS FUNCTION (sin cambios)
-# ============================================================
-def recommend_operating_ranges_for_curve(df_curve):
-    Ecol = "Vf" if "Vf" in df_curve.columns else ("Vu" if "Vu" in df_curve.columns else None)
-    df = df_curve[[Ecol, "Im"]].dropna().copy()
-    df.columns = ["E", "I"]
-
-    if len(df) < 20:
-        return None
-
-    E = df["E"].values
-    I = df["I"].values
-
-    Is = savgol_filter(I, 101, 3)
-    resid = I - Is
-
-    sigma = np.std(resid)
-    threshold = 1.5 * sigma
-
-    mask = np.abs(resid) < threshold
-
-    safe_E = E[mask]
-
-    return {
-        "Noise-Safe Min (V)": float(np.min(safe_E)),
-        "Noise-Safe Max (V)": float(np.max(safe_E))
-    }
+    return meta, [("Curve 1", df)]
 
 # ============================================================
 # EXPORT
@@ -213,7 +168,7 @@ uploaded_files = st.file_uploader(
 colors = px.colors.qualitative.Plotly
 
 # ============================================================
-# MAIN LOGIC
+# MAIN APP
 # ============================================================
 if uploaded_files:
 
@@ -242,6 +197,11 @@ if uploaded_files:
 
         st.subheader(f"📄 {file.name}")
 
+        if not curves:
+            st.error("❌ Could not parse this file. Check format.")
+            continue
+
+        # Export
         excel = convert_df_to_excel(curves)
         st.download_button("📥 Export Excel", excel, f"{file.name}.xlsx")
 
@@ -266,11 +226,11 @@ if uploaded_files:
                 y=dd["Im"],
                 mode="lines",
                 name=cid,
-                line=dict(color=colors[i % len(colors)])
+                line=dict(color=colors[i % len(colors)], width=2)
             ))
 
         fig.update_layout(
-            xaxis_title="E (V)",
+            xaxis_title="E (V vs Ref.)",
             yaxis_title="I (A)"
         )
 
