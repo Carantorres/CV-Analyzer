@@ -225,7 +225,7 @@ def parse_biologic_mpt(raw: str):
     meta = {}
     header_lines = 0
 
-    # Detect header
+    # Detect header length
     for line in lines:
         if "Nb header lines" in line:
             try:
@@ -234,11 +234,19 @@ def parse_biologic_mpt(raw: str):
                 header_lines = 0
             break
 
-    # Metadata
+    # Metadata extraction (Handles both ":" and spaced formatting)
     for i in range(min(header_lines, len(lines))):
-        if ":" in lines[i]:
-            k, v = lines[i].split(":", 1)
+        line = lines[i].strip()
+        if not line:
+            continue
+            
+        if ":" in line:
+            k, v = line.split(":", 1)
             meta[k.strip()] = v.strip()
+        else:
+            parts = re.split(r'\s{2,}|\t+', line)
+            if len(parts) >= 2:
+                meta[parts[0].strip()] = parts[1].strip()
 
     # Data
     data_lines = [line for line in lines[header_lines:] if line.strip()]
