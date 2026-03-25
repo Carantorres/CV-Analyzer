@@ -24,7 +24,7 @@ instrument = st.selectbox(
 )
 
 # ============================================================
-# GAMRY PARSER (igual que antes)
+# GAMRY PARSER
 # ============================================================
 def parse_gamry_dta_multi_curve(raw: str):
     lines = raw.splitlines()
@@ -55,7 +55,6 @@ def parse_gamry_dta_multi_curve(raw: str):
         df = pd.DataFrame(current_data, columns=cols)
         curves.append(("Curve", df))
 
-    # Limpieza
     clean_curves = []
     for cid, df in curves:
         for c in df.columns:
@@ -85,30 +84,66 @@ def parse_biologic_mpt(raw: str):
             break
 
     # Metadata
-    for i in range(header_lines):
+    for i in range(min(header_lines, len(lines))):
         if ":" in lines[i]:
             k, v = lines[i].split(":", 1)
             meta[k.strip()] = v.strip()
 
-    # Data
-    data_lines = lines[header_lines:]
+    # Data starts exactly after the header block
+    data_lines = [line for line in lines[header_lines:] if line.strip()]
 
-    if len(data_lines) < 2:
+    if not data_lines:
         return meta, []
 
-    cols = [c.strip() for c in data_lines[0].split("\t")]
+    # Biologic headers are sometimes split across the last two lines of the header block
+    line_minus_1 = [c.strip() for c in lines[header_lines - 1].split('\t')] if header_lines >= 1 else []
+    line_minus_2 = [c.strip() for c in lines[header_lines - 2].split('\t')] if header_lines >= 2 else []
+    
+    line_minus_1 = [c for c in line_minus_1 if c]
+    line_minus_2 = [c for c in line_minus_2 if c]
+
+    first_data_row = [c.strip() for c in data_lines[0].split('\t') if c.strip()]
+    num_cols = len(first_data_row)
+
+    # Reconstruct headers based on column length matches
+    if len(line_minus_1) == num_cols:
+        cols = line_minus_1
+    elif len(line_minus_2) + len(line_minus_1) == num_cols:
+        cols = line_minus_2 + line_minus_1
+    else:
+        # Fallback to generic columns if the header structure is unexpected
+        cols = [f"Col_{i}" for i in range(num_cols)]
+        for col_list in [line_minus_2, line_minus_1]:
+            for c in col_list:
+                cl = c.lower()
+                if "ewe" in cl or "potential" in cl:
+                    if len(cols) > 2: cols[2] = c
+                if "<i>" in cl or "current" in cl:
+                    if len(cols) > 3: cols[3] = c
 
     rows = []
-    for line in data_lines[1:]:
-        if not line.strip():
-            continue
-        parts = [p.strip() for p in line.split("\t")]
-        if len(parts) == len(cols):
-            rows.append(parts)
+    for line in data_lines:
+        parts = [p.strip() for p in line.split("\t") if p.strip()]
+        if len(parts) >= num_cols:
+            rows.append(parts[:num_cols])
+        elif len(parts) > 0:
+            rows.append(parts + [np.nan] * (num_cols - len(parts)))
 
-    df = pd.DataFrame(rows, columns=cols)
+    # 🚨 FIX: Force all column names to be strictly unique
+    unique_cols = []
+    seen = set()
+    for c in cols:
+        new_c = c
+        counter = 1
+        while new_c in seen:
+            new_c = f"{c}_{counter}"
+            counter += 1
+        unique_cols.append(new_c)
+        seen.add(new_c)
 
-    # 🔥 FIX IMPORTANTE (el error que tenías)
+    df = pd.DataFrame(rows, columns=unique_cols)
+
+    # Apply string replacement and float parsing
     for c in df.columns:
         col = df[c].astype(str)
         col = col.str.replace(",", ".", regex=False)
@@ -121,14 +156,11 @@ def parse_biologic_mpt(raw: str):
     # DETECCIÓN INTELIGENTE DE COLUMNAS
     # ========================================================
     col_map = {}
-
     for c in df.columns:
         cl = c.lower()
-
         if "ewe" in cl or "potential" in cl or "voltage" in cl:
             col_map[c] = "Vf"
-
-        if "<i>" in cl or "current" in cl:
+        if "<i>" in cl or "current" in cl or "i/ma" in cl:
             col_map[c] = "Im"
 
     df = df.rename(columns=col_map)
@@ -235,4 +267,3 @@ if uploaded_files:
         )
 
         st.plotly_chart(fig, use_container_width=True)
-
