@@ -466,6 +466,17 @@ SUPER_PALETTES = [
 ]
 
 with st.sidebar:
+    st.header("⚡ iR Drop Compensation")
+    st.markdown("Apply software iR compensation post-run.")
+    apply_ir = st.toggle("Apply iR Compensation", value=False)
+    if apply_ir:
+        ru_ohms = st.number_input("Uncompensated Resistance (Ru) [Ohms]", value=10.0, step=1.0)
+        comp_percent = st.slider("Compensation Percentage (%)", min_value=0, max_value=100, value=85, step=1, help="Avoid 100% to prevent overcompensation noise.")
+    else:
+        ru_ohms = 0.0
+        comp_percent = 0.0
+
+    st.markdown("---")
     st.header("⚖️ Reference Electrode & RHE")
     convert_to_rhe = st.toggle("Convert E to RHE scale", value=True)
     if convert_to_rhe:
@@ -480,12 +491,14 @@ with st.sidebar:
         e0_ref = 0.0
         ph_val = 0.0
         x_axis_label = "E (V vs Ref.)"
+        
+    if apply_ir:
+        x_axis_label += " [iR corrected]"
 
     st.markdown("---")
     st.header("⚙️ Catalytic Parameters")
     st.markdown("Set these values to accurately calculate Current Density ($j$) and Overpotential ($\eta$).")
     
-    # FORMAT UPDATED TO %.5f FOR INCREASED PRECISION
     electrode_area = st.number_input("Electrode Area (cm²)", min_value=0.00001, value=1.00000, step=0.001, format="%.5f")
     
     if convert_to_rhe:
@@ -496,7 +509,6 @@ with st.sidebar:
     st.header("📄 Export Full Report")
     st.markdown("Save this entire dashboard exactly as it appears into a multi-page PDF.")
     
-    # HTML INJECTION FOR NATIVE PDF PRINTING
     components.html(
         """
         <script>
@@ -625,6 +637,9 @@ if uploaded_files:
                 if Ecol and "Im" in df_comp.columns:
                     dd_comp = df_comp[[Ecol, "Im"]].replace([np.inf, -np.inf], np.nan).dropna()
                     
+                    if apply_ir:
+                        dd_comp[Ecol] = dd_comp[Ecol] - dd_comp["Im"] * ru_ohms * (comp_percent / 100.0)
+                    
                     if convert_to_rhe:
                         dd_comp[Ecol] = dd_comp[Ecol] + e0_ref + (0.0591 * ph_val)
                     
@@ -742,6 +757,7 @@ if uploaded_files:
                 st.dataframe(df_cat, use_container_width=True)
             st.markdown("<br>", unsafe_allow_html=True)
 
+
     # --- ZONA: SUPER GROUPS ---
     st.markdown("---")
     st.header("🧬 Super Groups (Group of Groups)")
@@ -787,9 +803,7 @@ if uploaded_files:
                         tech_sg = "Unknown"
                         if instrument.startswith("Gamry"):
                             _, curves_comp = parse_gamry_dta_multi_curve(raw_text)
-                            tag = meta.get("TAG", "").upper()
-                            title = meta.get("TITLE", "").upper()
-                            if "LSV" in tag or "LINEAR" in title:
+                            if "LSV" in meta.get("TAG", "").upper() or "LINEAR" in meta.get("TITLE", "").upper():
                                 tech_sg = "LSV"
                         else:
                             _, curves_comp = parse_biologic_mpt(raw_text)
@@ -800,6 +814,9 @@ if uploaded_files:
                             Ecol = "Vf" if "Vf" in df_comp.columns else ("Vu" if "Vu" in df_comp.columns else None)
                             if Ecol and "Im" in df_comp.columns:
                                 dd_comp = df_comp[[Ecol, "Im"]].replace([np.inf, -np.inf], np.nan).dropna()
+                                
+                                if apply_ir:
+                                    dd_comp[Ecol] = dd_comp[Ecol] - dd_comp["Im"] * ru_ohms * (comp_percent / 100.0)
                                 
                                 if convert_to_rhe:
                                     dd_comp[Ecol] = dd_comp[Ecol] + e0_ref + (0.0591 * ph_val)
@@ -941,6 +958,9 @@ if uploaded_files:
                 continue
                 
             dd = dfi[[Ecol, "Im"]].replace([np.inf, -np.inf], np.nan).dropna()
+            
+            if apply_ir:
+                dd[Ecol] = dd[Ecol] - dd["Im"] * ru_ohms * (comp_percent / 100.0)
             
             if convert_to_rhe:
                 dd[Ecol] = dd[Ecol] + e0_ref + (0.0591 * ph_val)
