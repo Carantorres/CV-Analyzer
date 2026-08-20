@@ -225,6 +225,7 @@ def parse_biologic_mpt(raw: str):
     meta = {}
     header_lines = 0
 
+    # Detect header length
     for line in lines:
         if "Nb header lines" in line:
             try:
@@ -233,6 +234,7 @@ def parse_biologic_mpt(raw: str):
                 header_lines = 0
             break
 
+    # Metadata extraction (Handles both ":" and spaced formatting)
     for i in range(min(header_lines, len(lines))):
         line = lines[i].strip()
         if not line:
@@ -246,6 +248,7 @@ def parse_biologic_mpt(raw: str):
             if len(parts) >= 2:
                 meta[parts[0].strip()] = parts[1].strip()
 
+    # Data
     data_lines = [line for line in lines[header_lines:] if line.strip()]
 
     if not data_lines:
@@ -282,6 +285,7 @@ def parse_biologic_mpt(raw: str):
         elif len(parts) > 0:
             rows.append(parts + [np.nan] * (num_cols - len(parts)))
 
+    # Force unique columns
     unique_cols = []
     seen = set()
     for c in cols:
@@ -302,6 +306,9 @@ def parse_biologic_mpt(raw: str):
 
     df = df.replace([np.inf, -np.inf], np.nan).dropna(how="all").reset_index(drop=True)
 
+    # ========================================================
+    # DETECCIÓN DE COLUMNAS E IDENTIFICACIÓN DE CICLOS
+    # ========================================================
     col_map = {}
     for c in df.columns:
         cl = c.lower()
@@ -320,6 +327,7 @@ def parse_biologic_mpt(raw: str):
     if df["Im"].abs().max() > 1:
         df["Im"] = df["Im"] / 1000
 
+    # Dividir datos basado en número de ciclo
     curves = []
     if "Cycle" in df.columns:
         unique_cycles = sorted(df["Cycle"].dropna().unique())
@@ -402,9 +410,11 @@ if uploaded_files:
         if instrument.startswith("Gamry"):
             meta, curves = parse_gamry_dta_multi_curve(raw_text)
             
-            # Detectar LSV vs CV en Gamry
+            # Detectar LSV vs CV basándonos en TITLE o TAG explícitos
             tag = meta.get("TAG", "").upper()
-            if "LSV" in tag or "VFINAL" in meta:
+            title = meta.get("TITLE", "").upper()
+            
+            if "LSV" in tag or "LINEAR" in title:
                 technique = "Linear Sweep Voltammetry (LSV)"
                 vinit = _to_float(meta.get("VINIT"))
                 vlim1 = _to_float(meta.get("VFINAL"))
