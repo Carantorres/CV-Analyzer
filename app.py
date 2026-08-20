@@ -353,7 +353,7 @@ def convert_df_to_excel(curves_list: List[Tuple[str, pd.DataFrame]]) -> bytes:
 # ============================================================
 uploaded_files = st.file_uploader("Upload CV/LSV files", type=["DTA", "dta", "mpt", "MPT"], accept_multiple_files=True)
 default_colors = px.colors.qualitative.Plotly
-combined_palette = px.colors.qualitative.Alphabet + px.colors.qualitative.Plotly # Paleta ampliada para plot combinado
+combined_palette = px.colors.qualitative.Alphabet + px.colors.qualitative.Plotly # Paleta más amplia para grupos
 
 if uploaded_files:
     file_dict = {f.name: f for f in uploaded_files}
@@ -390,20 +390,96 @@ if uploaded_files:
 
     actual_file_order = [name.replace("⋮⋮ ", "") for name in sorted_display_names]
 
-    # --- TOP CONTAINER PARA EL GRÁFICO COMBINADO ---
-    top_container = st.container()
-    show_combined = top_container.toggle("📈 Generate Combined Plot (Compare All Uploaded Files)", value=False)
-    
-    combined_fig = go.Figure()
-    combined_trace_idx = 0
+    # ============================================================
+    # 🗂️ CUSTOM COMPARISON GROUPS
+    # ============================================================
+    st.markdown("---")
+    st.header("🗂️ Custom Comparison Groups")
+    st.markdown("Create groups below to plot specific files together for comparison.")
 
-    # Iteración sobre los archivos
+    # Control del número de grupos
+    if 'num_groups' not in st.session_state:
+        st.session_state.num_groups = 0
+
+    col_btn1, col_btn2, _ = st.columns([1, 1, 6])
+    with col_btn1:
+        if st.button("➕ Add Group"):
+            st.session_state.num_groups += 1
+    with col_btn2:
+        if st.session_state.num_groups > 0:
+            if st.button("➖ Remove Last Group"):
+                st.session_state.num_groups -= 1
+
+    # Renderizar cada grupo
+    for g in range(st.session_state.num_groups):
+        with st.expander(f"Comparison Group {g+1}", expanded=True):
+            selected_files = st.multiselect(
+                "Select files to include in this group:", 
+                options=actual_file_order, 
+                key=f"group_select_{g}"
+            )
+            
+            if selected_files:
+                fig_comp = go.Figure()
+                trace_idx = 0
+                
+                for fname in selected_files:
+                    file = file_dict[fname]
+                    raw_text = file.getvalue().decode("utf-8", errors="replace")
+                    
+                    if instrument.startswith("Gamry"):
+                        _, curves_comp = parse_gamry_dta_multi_curve(raw_text)
+                    else:
+                        _, curves_comp = parse_biologic_mpt(raw_text)
+                        
+                    for cid, df_comp in curves_comp:
+                        Ecol = "Vf" if "Vf" in df_comp.columns else ("Vu" if "Vu" in df_comp.columns else None)
+                        if Ecol and "Im" in df_comp.columns:
+                            dd_comp = df_comp[[Ecol, "Im"]].replace([np.inf, -np.inf], np.nan).dropna()
+                            if len(dd_comp) >= 10:
+                                # Si hay más de 1 curva, mostrar el nombre del archivo + ciclo
+                                trace_name = f"{fname}" if len(curves_comp) == 1 else f"{fname} ({cid})"
+                                c_color = combined_palette[trace_idx % len(combined_palette)]
+                                
+                                fig_comp.add_trace(go.Scatter(
+                                    x=dd_comp[Ecol], 
+                                    y=dd_comp["Im"], 
+                                    mode='lines',
+                                    name=trace_name,
+                                    line=dict(color=c_color, width=2)
+                                ))
+                                trace_idx += 1
+                                
+                fig_comp.update_layout(
+                    xaxis_title="E (V vs Ref.)",
+                    yaxis_title="I (A)",
+                    legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99, bgcolor="rgba(0,0,0,0.5)"),
+                    height=600
+                )
+                
+                plot_config_group = {
+                    'toImageButtonOptions': {
+                        'format': 'png', 
+                        'filename': f"Comparison_Group_{g+1}", 
+                        'height': 600,
+                        'width': 1000,
+                        'scale': 4 
+                    }
+                }
+                st.plotly_chart(fig_comp, use_container_width=True, config=plot_config_group)
+
+
+    # ============================================================
+    # 📄 INDIVIDUAL FILE ANALYSIS
+    # ============================================================
+    st.markdown("---")
+    st.header("📄 Individual Analysis")
+
     for file_name in actual_file_order:
         if file_name not in file_dict:
             continue 
             
         file = file_dict[file_name]
-        st.markdown("---")
         raw_text = file.getvalue().decode("utf-8", errors="replace")
         
         technique = "Unknown Technique"
@@ -447,9 +523,9 @@ if uploaded_files:
             st.error(f"❌ Could not parse {file.name}. Check format.")
             continue
 
+        st.markdown(f"### {file.name}")
         col_title, col_btn = st.columns([4, 1])
         with col_title:
-            st.subheader(f"📄 Data for: {file.name}")
             st.markdown(f"🔬 **Technique Detected:** `{technique}`")
         with col_btn:
             excel_data = convert_df_to_excel(curves)
@@ -488,7 +564,6 @@ if uploaded_files:
             
             line_color = default_colors[i % len(default_colors)]
             
-            # Gráfico individual
             fig.add_trace(go.Scatter(
                 x=dd[Ecol], 
                 y=dd["Im"], 
@@ -496,20 +571,6 @@ if uploaded_files:
                 name=cid,
                 line=dict(color=line_color, width=2)
             ))
-
-            # Agregar al gráfico combinado si el toggle está encendido
-            if show_combined:
-                trace_name = f"{file.name}" if len(curves) == 1 else f"{file.name} ({cid})"
-                combined_line_color = combined_palette[combined_trace_idx % len(combined_palette)]
-                
-                combined_fig.add_trace(go.Scatter(
-                    x=dd[Ecol], 
-                    y=dd["Im"], 
-                    mode='lines',
-                    name=trace_name,
-                    line=dict(color=combined_line_color, width=2)
-                ))
-                combined_trace_idx += 1
             
             out = recommend_operating_ranges_for_curve(dfi)
             ns = out["recommended_noise_safe_V"]
@@ -545,34 +606,5 @@ if uploaded_files:
         if results_list:
             st.write("**Recommended Operating Ranges:**")
             st.dataframe(pd.DataFrame(results_list), use_container_width=True)
-
-    # --- RENDERIZAR GRÁFICO COMBINADO EN LA PARTE SUPERIOR ---
-    if show_combined and combined_trace_idx > 0:
-        with top_container:
-            st.info("💡 **Tip:** Puedes hacer doble clic sobre el nombre de un archivo en la leyenda para aislarlo, o un clic simple para ocultarlo/mostrarlo.")
             
-            combined_fig.update_layout(
-                title="Master Comparison Plot",
-                xaxis_title="E (V vs Ref.)",
-                yaxis_title="I (A)",
-                height=700, # Gráfico un poco más grande para facilitar la comparación
-                legend=dict(
-                    yanchor="top", 
-                    y=0.99, 
-                    xanchor="right", 
-                    x=0.99, 
-                    bgcolor="rgba(0,0,0,0.5)" # Fondo semitransparente para que no bloquee totalmente las curvas
-                )
-            )
-            
-            plot_config_combined = {
-                'toImageButtonOptions': {
-                    'format': 'png', 
-                    'filename': "Master_Comparison_Plot", 
-                    'height': 800,
-                    'width': 1200,
-                    'scale': 4 
-                }
-            }
-            
-            st.plotly_chart(combined_fig, use_container_width=True, config=plot_config_combined)
+        st.markdown("<br><br>", unsafe_allow_html=True)
