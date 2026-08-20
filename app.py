@@ -131,7 +131,6 @@ def recommend_operating_ranges_for_curve(df_curve, baseline_E_window=0.20, smoot
 # CATALYTIC PARAMETERS & ROBUST TAFEL FIT
 # ============================================================
 def extract_lsv_catalytic_parameters(df_curve: pd.DataFrame, area_cm2: float, e_rev: float) -> Tuple[dict, dict]:
-    """Extrae parámetros catalíticos incluyendo j vs eta (sobrepotencial) y Tafel."""
     Ecol = "Vf" if "Vf" in df_curve.columns else ("Vu" if "Vu" in df_curve.columns else None)
     if Ecol is None or "Im" not in df_curve.columns:
         return {}, {}
@@ -144,7 +143,6 @@ def extract_lsv_catalytic_parameters(df_curve: pd.DataFrame, area_cm2: float, e_
     if len(abs_I) < 20:
         return {}, {}
         
-    # Calcular j (mA/cm2) y eta (mV)
     j_dens = (abs_I * 1000) / area_cm2
     eta_mV = np.abs(E - e_rev) * 1000
     
@@ -155,7 +153,6 @@ def extract_lsv_catalytic_parameters(df_curve: pd.DataFrame, area_cm2: float, e_
     onset_mask = abs_I >= 0.05 * I_max
     E_onset = E[onset_mask][0] if np.any(onset_mask) else np.nan
     
-    # Búsqueda rigurosa de Tafel (R^2 max)
     search_mask = (abs_I >= 0.02 * I_max) & (abs_I <= 0.40 * I_max)
     E_search = E[search_mask]
     I_search = abs_I[search_mask]
@@ -184,7 +181,6 @@ def extract_lsv_catalytic_parameters(df_curve: pd.DataFrame, area_cm2: float, e_
 
     tafel_slope = abs(best_slope * 1000) if not np.isnan(best_slope) else np.nan
             
-    # Extraer sobrepotenciales a j = 10, 20, 50, 100
     sort_idx = np.argsort(j_dens)
     j_sorted = j_dens[sort_idx]
     eta_sorted = eta_mV[sort_idx]
@@ -468,12 +464,30 @@ SUPER_PALETTES = [
     px.colors.sequential.Greys[::-1]
 ]
 
-# Side bar configs before main logic
 with st.sidebar:
+    st.header("⚖️ Reference Electrode & RHE")
+    convert_to_rhe = st.toggle("Convert E to RHE scale", value=True)
+    if convert_to_rhe:
+        ref_elec = st.selectbox("Reference Electrode", ["Ag/AgCl (sat. KCl)", "SCE (sat. KCl)", "Hg/HgO (1M KOH)", "Custom"])
+        if ref_elec == "Ag/AgCl (sat. KCl)": e0_ref = 0.197
+        elif ref_elec == "SCE (sat. KCl)": e0_ref = 0.241
+        elif ref_elec == "Hg/HgO (1M KOH)": e0_ref = 0.098
+        else: e0_ref = st.number_input("Custom E0_Ref (V)", value=0.000, step=0.01)
+        ph_val = st.number_input("pH of the solution", value=14.0, step=0.1)
+        x_axis_label = "E (V vs RHE)"
+    else:
+        e0_ref = 0.0
+        ph_val = 0.0
+        x_axis_label = "E (V vs Ref.)"
+
+    st.markdown("---")
     st.header("⚙️ Catalytic Parameters")
     st.markdown("Set these values to accurately calculate Current Density ($j$) and Overpotential ($\eta$).")
     electrode_area = st.number_input("Electrode Area (cm²)", min_value=0.0001, value=1.000, step=0.1)
-    e_rev = st.number_input("Thermodynamic Potential (E_rev vs Ref)", value=0.000, step=0.01, help="Used to calculate Overpotential: η = |E - E_rev|")
+    
+    if convert_to_rhe:
+        st.info("💡 **Tip:** Since you are converting to RHE, E_rev is generally **0.0 V** for HER and **1.23 V** for OER.")
+    e_rev = st.number_input("Thermodynamic Potential (E_rev)", value=0.000, step=0.01, help="Used to calculate Overpotential: η = |E - E_rev|")
     st.markdown("---")
 
 if uploaded_files:
@@ -494,7 +508,6 @@ if uploaded_files:
     if new_items:
         st.session_state.file_groups[0]["items"].extend(list(new_items))
 
-    # --- SIDEBAR: DRAG AND DROP GROUPS ---
     with st.sidebar:
         st.header("🗂️ Drag & Drop Groups")
         st.markdown("Organize your files into groups.")
@@ -546,7 +559,7 @@ if uploaded_files:
         
         fig_comp = go.Figure()
         fig_tafel_comp = go.Figure()
-        fig_jeta_comp = go.Figure() # Nuevo gráfico para j vs eta
+        fig_jeta_comp = go.Figure() 
         
         trace_idx = 0
         group_lsv_params = [] 
@@ -577,6 +590,10 @@ if uploaded_files:
                 Ecol = "Vf" if "Vf" in df_comp.columns else ("Vu" if "Vu" in df_comp.columns else None)
                 if Ecol and "Im" in df_comp.columns:
                     dd_comp = df_comp[[Ecol, "Im"]].replace([np.inf, -np.inf], np.nan).dropna()
+                    
+                    if convert_to_rhe:
+                        dd_comp[Ecol] = dd_comp[Ecol] + e0_ref + (0.0591 * ph_val)
+                    
                     if len(dd_comp) >= 10:
                         trace_name = f"{fname}" if len(curves_comp) == 1 else f"{fname} ({cid})"
                         c_color = combined_palette[trace_idx % len(combined_palette)]
@@ -598,7 +615,6 @@ if uploaded_files:
                                 group_lsv_params.append(cat_params)
                                 max_log_I_global = max(max_log_I_global, fit_data["log_I_max"])
                                 
-                                # Tafel Plot Group
                                 fig_tafel_comp.add_trace(go.Scatter(
                                     x=fit_data["log_I_full"],
                                     y=fit_data["E_full"],
@@ -623,7 +639,6 @@ if uploaded_files:
                                         line=dict(color=c_color, width=2, dash='dot')
                                     ))
 
-                                # j vs eta Group
                                 fig_jeta_comp.add_trace(go.Scatter(
                                     x=fit_data["eta_mV"],
                                     y=fit_data["j_dens"],
@@ -634,7 +649,7 @@ if uploaded_files:
                         
         fig_comp.update_layout(
             title="Raw Data (E vs I)",
-            xaxis_title="E (V vs Ref.)",
+            xaxis_title=x_axis_label,
             yaxis_title="I (A)",
             legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99, bgcolor="rgba(0,0,0,0.5)"),
             height=500
@@ -657,22 +672,18 @@ if uploaded_files:
                 fig_tafel_comp.update_layout(
                     title="Tafel Plot (log₁₀|I| vs E)",
                     xaxis_title="log₁₀|I| (A)",
-                    yaxis_title="E (V vs Ref.)",
+                    yaxis_title=x_axis_label,
                     xaxis=dict(range=[max_log_I_global - 4.5, max_log_I_global + 0.2]),
                     legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99, bgcolor="rgba(0,0,0,0.5)"),
                     height=500
                 )
                 st.plotly_chart(fig_tafel_comp, use_container_width=True)
         
-        # --- TABLA DE ESTADÍSTICAS DEL GRUPO ---
         if group_lsv_params:
             st.markdown("#### 🧪 Group Catalytic Statistics (LSV)")
-            st.info(f"ℹ️ **Cálculo Robusto de Tafel:** Evaluado dinámicamente mediante regresión de ventana deslizante para localizar el máximo $R^2$. Evaluado con un área de **{electrode_area} cm²** y un **E_rev = {e_rev} V**.")
-            
             df_cat = pd.DataFrame(group_lsv_params)
             summary = []
             
-            # Dinámicamente identificar todas las columnas numéricas relevantes para hacer el resumen
             cols_to_summarize = ["j_max (mA/cm²)", "E_onset (V)", "Tafel Slope (mV/dec)", "Tafel R²"] + [c for c in df_cat.columns if c.startswith("η_")]
             
             for col in cols_to_summarize:
@@ -752,6 +763,10 @@ if uploaded_files:
                             Ecol = "Vf" if "Vf" in df_comp.columns else ("Vu" if "Vu" in df_comp.columns else None)
                             if Ecol and "Im" in df_comp.columns:
                                 dd_comp = df_comp[[Ecol, "Im"]].replace([np.inf, -np.inf], np.nan).dropna()
+                                
+                                if convert_to_rhe:
+                                    dd_comp[Ecol] = dd_comp[Ecol] + e0_ref + (0.0591 * ph_val)
+                                
                                 if len(dd_comp) >= 10:
                                     trace_name = f"{g_name} | {fname}" if len(curves_comp) == 1 else f"{g_name} | {fname} ({cid})"
                                     color_shade = current_palette[(item_idx * 2) % len(current_palette)]
@@ -779,7 +794,7 @@ if uploaded_files:
                                     
                 fig_super.update_layout(
                     title=f"Combined Raw Plot: {', '.join(selected_groups)}",
-                    xaxis_title="E (V vs Ref.)",
+                    xaxis_title=x_axis_label,
                     yaxis_title="I (A)",
                     legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99, bgcolor="rgba(0,0,0,0.5)"),
                     height=600
@@ -878,7 +893,7 @@ if uploaded_files:
 
         fig = go.Figure()
         fig_tafel = go.Figure()
-        fig_jeta = go.Figure() # Nuevo gráfico para j vs eta
+        fig_jeta = go.Figure() 
         results_list = []
         lsv_cat_list = [] 
         max_log_I_ind = -10
@@ -889,6 +904,10 @@ if uploaded_files:
                 continue
                 
             dd = dfi[[Ecol, "Im"]].replace([np.inf, -np.inf], np.nan).dropna()
+            
+            if convert_to_rhe:
+                dd[Ecol] = dd[Ecol] + e0_ref + (0.0591 * ph_val)
+                
             if len(dd) < 10:
                 continue
             
@@ -946,7 +965,6 @@ if uploaded_files:
                             line=dict(color=line_color, width=2, dash='dot')
                         ))
                         
-                    # Gráfico de j vs eta
                     fig_jeta.add_trace(go.Scatter(
                         x=fit_data["eta_mV"], 
                         y=fit_data["j_dens"], 
@@ -957,7 +975,7 @@ if uploaded_files:
 
         fig.update_layout(
             title="Raw Data (E vs I)",
-            xaxis_title="E (V vs Ref.)",
+            xaxis_title=x_axis_label,
             yaxis_title="I (A)",
             legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01, bgcolor="rgba(0,0,0,0)"),
             height=500
@@ -980,7 +998,7 @@ if uploaded_files:
                 fig_tafel.update_layout(
                     title="Tafel Plot (log₁₀|I| vs E)",
                     xaxis_title="log₁₀|I| (A)",
-                    yaxis_title="E (V vs Ref.)",
+                    yaxis_title=x_axis_label,
                     xaxis=dict(range=[max_log_I_ind - 4.5, max_log_I_ind + 0.2]),
                     legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99, bgcolor="rgba(0,0,0,0.5)"),
                     height=500
