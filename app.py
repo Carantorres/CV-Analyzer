@@ -353,26 +353,50 @@ def convert_df_to_excel(curves_list: List[Tuple[str, pd.DataFrame]]) -> bytes:
 # ============================================================
 uploaded_files = st.file_uploader("Upload CV/LSV files", type=["DTA", "dta", "mpt", "MPT"], accept_multiple_files=True)
 default_colors = px.colors.qualitative.Plotly
-combined_palette = px.colors.qualitative.Alphabet + px.colors.qualitative.Plotly # Paleta más amplia para grupos
+combined_palette = px.colors.qualitative.Alphabet + px.colors.qualitative.Plotly 
 
 if uploaded_files:
     file_dict = {f.name: f for f in uploaded_files}
-    display_names = [f"⋮⋮ {name}" for name in file_dict.keys()]
+    display_names = set([f"⋮⋮ {name}" for name in file_dict.keys()])
     
-    if 'file_order' not in st.session_state:
-        st.session_state.file_order = display_names
-    else:
-        current_files = set(display_names)
-        for name in display_names:
-            if name not in st.session_state.file_order:
-                st.session_state.file_order.append(name)
-        st.session_state.file_order = [name for name in st.session_state.file_order if name in current_files]
+    # Inicializar estado de grupos múltiples si no existe
+    if 'file_groups' not in st.session_state:
+        st.session_state.file_groups = [
+            {"header": "📥 Unassigned Files", "items": []},
+            {"header": "📊 Group 1", "items": []}
+        ]
+        
+    # Sincronización: Eliminar archivos que el usuario borró
+    for group in st.session_state.file_groups:
+        group["items"] = [item for item in group["items"] if item in display_names]
+        
+    # Sincronización: Añadir archivos nuevos al grupo "Unassigned Files"
+    existing_items = set([item for group in st.session_state.file_groups for item in group["items"]])
+    new_items = display_names - existing_items
+    if new_items:
+        st.session_state.file_groups[0]["items"].extend(list(new_items))
 
+    # --- SIDEBAR: DRAG AND DROP GROUPS ---
     with st.sidebar:
-        st.header("🔄 Rearrange Plots")
-        st.markdown("Drag and drop to reorder:")
-        sorted_display_names = sort_items(st.session_state.file_order)
-        st.session_state.file_order = sorted_display_names
+        st.header("🗂️ Drag & Drop Groups")
+        st.markdown("Drag files into groups to compare them automatically. Files left in `Unassigned` won't be grouped.")
+        
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("➕ Add Group"):
+                new_idx = len(st.session_state.file_groups)
+                st.session_state.file_groups.append({"header": f"📊 Group {new_idx}", "items": []})
+                st.rerun()
+        with c2:
+            if st.button("➖ Remove Group") and len(st.session_state.file_groups) > 1:
+                # Regresar los archivos del grupo eliminado a "Unassigned"
+                orphans = st.session_state.file_groups[-1]["items"]
+                st.session_state.file_groups[0]["items"].extend(orphans)
+                st.session_state.file_groups.pop()
+                st.rerun()
+                
+        # Interfaz Drag & Drop nativa múltiple!
+        st.session_state.file_groups = sort_items(st.session_state.file_groups)
         
         st.markdown("---")
         st.markdown(
@@ -388,92 +412,80 @@ if uploaded_files:
             unsafe_allow_html=True
         )
 
-    actual_file_order = [name.replace("⋮⋮ ", "") for name in sorted_display_names]
-
-    # ============================================================
-    # 🗂️ CUSTOM COMPARISON GROUPS
-    # ============================================================
-    st.markdown("---")
-    st.header("🗂️ Custom Comparison Groups")
-    st.markdown("Create groups below to plot specific files together for comparison.")
-
-    # Control del número de grupos
-    if 'num_groups' not in st.session_state:
-        st.session_state.num_groups = 0
-
-    col_btn1, col_btn2, _ = st.columns([1, 1, 6])
-    with col_btn1:
-        if st.button("➕ Add Group"):
-            st.session_state.num_groups += 1
-    with col_btn2:
-        if st.session_state.num_groups > 0:
-            if st.button("➖ Remove Last Group"):
-                st.session_state.num_groups -= 1
-
-    # Renderizar cada grupo
-    for g in range(st.session_state.num_groups):
-        with st.expander(f"Comparison Group {g+1}", expanded=True):
-            selected_files = st.multiselect(
-                "Select files to include in this group:", 
-                options=actual_file_order, 
-                key=f"group_select_{g}"
-            )
+    # --- TOP AREA: GROUPED COMPARISONS ---
+    # Iterar sobre todos los grupos (saltando el grupo 0 "Unassigned")
+    has_groups_plotted = False
+    
+    for g_idx, group in enumerate(st.session_state.file_groups):
+        if g_idx == 0: 
+            continue # Saltamos la carpeta Unassigned
+        if not group["items"]: 
+            continue # Saltamos grupos vacíos
             
-            if selected_files:
-                fig_comp = go.Figure()
-                trace_idx = 0
+        if not has_groups_plotted:
+            st.header("📈 Grouped Comparisons")
+            has_groups_plotted = True
+            
+        st.subheader(f"{group['header']}")
+        
+        fig_comp = go.Figure()
+        trace_idx = 0
+        
+        for item in group["items"]:
+            fname = item.replace("⋮⋮ ", "")
+            if fname not in file_dict: 
+                continue
+            
+            file = file_dict[fname]
+            raw_text = file.getvalue().decode("utf-8", errors="replace")
+            
+            if instrument.startswith("Gamry"):
+                _, curves_comp = parse_gamry_dta_multi_curve(raw_text)
+            else:
+                _, curves_comp = parse_biologic_mpt(raw_text)
                 
-                for fname in selected_files:
-                    file = file_dict[fname]
-                    raw_text = file.getvalue().decode("utf-8", errors="replace")
-                    
-                    if instrument.startswith("Gamry"):
-                        _, curves_comp = parse_gamry_dta_multi_curve(raw_text)
-                    else:
-                        _, curves_comp = parse_biologic_mpt(raw_text)
+            for cid, df_comp in curves_comp:
+                Ecol = "Vf" if "Vf" in df_comp.columns else ("Vu" if "Vu" in df_comp.columns else None)
+                if Ecol and "Im" in df_comp.columns:
+                    dd_comp = df_comp[[Ecol, "Im"]].replace([np.inf, -np.inf], np.nan).dropna()
+                    if len(dd_comp) >= 10:
+                        trace_name = f"{fname}" if len(curves_comp) == 1 else f"{fname} ({cid})"
+                        c_color = combined_palette[trace_idx % len(combined_palette)]
                         
-                    for cid, df_comp in curves_comp:
-                        Ecol = "Vf" if "Vf" in df_comp.columns else ("Vu" if "Vu" in df_comp.columns else None)
-                        if Ecol and "Im" in df_comp.columns:
-                            dd_comp = df_comp[[Ecol, "Im"]].replace([np.inf, -np.inf], np.nan).dropna()
-                            if len(dd_comp) >= 10:
-                                # Si hay más de 1 curva, mostrar el nombre del archivo + ciclo
-                                trace_name = f"{fname}" if len(curves_comp) == 1 else f"{fname} ({cid})"
-                                c_color = combined_palette[trace_idx % len(combined_palette)]
-                                
-                                fig_comp.add_trace(go.Scatter(
-                                    x=dd_comp[Ecol], 
-                                    y=dd_comp["Im"], 
-                                    mode='lines',
-                                    name=trace_name,
-                                    line=dict(color=c_color, width=2)
-                                ))
-                                trace_idx += 1
-                                
-                fig_comp.update_layout(
-                    xaxis_title="E (V vs Ref.)",
-                    yaxis_title="I (A)",
-                    legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99, bgcolor="rgba(0,0,0,0.5)"),
-                    height=600
-                )
-                
-                plot_config_group = {
-                    'toImageButtonOptions': {
-                        'format': 'png', 
-                        'filename': f"Comparison_Group_{g+1}", 
-                        'height': 600,
-                        'width': 1000,
-                        'scale': 4 
-                    }
-                }
-                st.plotly_chart(fig_comp, use_container_width=True, config=plot_config_group)
+                        fig_comp.add_trace(go.Scatter(
+                            x=dd_comp[Ecol], 
+                            y=dd_comp["Im"], 
+                            mode='lines',
+                            name=trace_name,
+                            line=dict(color=c_color, width=2)
+                        ))
+                        trace_idx += 1
+                        
+        fig_comp.update_layout(
+            xaxis_title="E (V vs Ref.)",
+            yaxis_title="I (A)",
+            legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99, bgcolor="rgba(0,0,0,0.5)"),
+            height=600
+        )
+        
+        plot_config_group = {
+            'toImageButtonOptions': {
+                'format': 'png', 
+                'filename': f"Comparison_{group['header'].replace(' ', '_')}", 
+                'height': 600,
+                'width': 1000,
+                'scale': 4 
+            }
+        }
+        st.plotly_chart(fig_comp, use_container_width=True, config=plot_config_group)
 
 
-    # ============================================================
-    # 📄 INDIVIDUAL FILE ANALYSIS
-    # ============================================================
+    # --- BOTTOM AREA: INDIVIDUAL ANALYSIS ---
     st.markdown("---")
     st.header("📄 Individual Analysis")
+
+    # Aplanar la lista de archivos basándose en cómo están ordenados en TODOS los grupos para mantener el orden visual
+    actual_file_order = [item.replace("⋮⋮ ", "") for group in st.session_state.file_groups for item in group["items"]]
 
     for file_name in actual_file_order:
         if file_name not in file_dict:
