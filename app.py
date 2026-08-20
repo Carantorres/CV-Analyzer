@@ -355,22 +355,31 @@ uploaded_files = st.file_uploader("Upload CV/LSV files", type=["DTA", "dta", "mp
 default_colors = px.colors.qualitative.Plotly
 combined_palette = px.colors.qualitative.Alphabet + px.colors.qualitative.Plotly 
 
+# Definimos paletas por color base para los super grupos (invertimos para que arranquen oscuros)
+SUPER_PALETTES = [
+    px.colors.sequential.Blues[::-1],  
+    px.colors.sequential.Reds[::-1],   
+    px.colors.sequential.Greens[::-1], 
+    px.colors.sequential.Purples[::-1],
+    px.colors.sequential.Oranges[::-1],
+    px.colors.sequential.Greys[::-1]
+]
+
 if uploaded_files:
     file_dict = {f.name: f for f in uploaded_files}
     display_names = set([f"⋮⋮ {name}" for name in file_dict.keys()])
     
-    # Initialize multi-group state
+    # Init main drag and drop groups
     if 'file_groups' not in st.session_state:
         st.session_state.file_groups = [
             {"header": "📥 Unassigned Files", "items": []},
             {"header": "📊 Group 1", "items": []}
         ]
         
-    # Sync deleted files
+    # Sync files
     for group in st.session_state.file_groups:
         group["items"] = [item for item in group["items"] if item in display_names]
         
-    # Sync new files into Unassigned
     existing_items = set([item for group in st.session_state.file_groups for item in group["items"]])
     new_items = display_names - existing_items
     if new_items:
@@ -379,7 +388,7 @@ if uploaded_files:
     # --- SIDEBAR: DRAG AND DROP GROUPS ---
     with st.sidebar:
         st.header("🗂️ Drag & Drop Groups")
-        st.markdown("Drag files into groups to compare them automatically. Files left in `Unassigned` won't be grouped.")
+        st.markdown("Organize your files into groups.")
         
         c1, c2 = st.columns(2)
         with c1:
@@ -394,7 +403,6 @@ if uploaded_files:
                 st.session_state.file_groups.pop()
                 st.rerun()
                 
-        # The crucial fix: multi_containers=True
         st.session_state.file_groups = sort_items(st.session_state.file_groups, multi_containers=True)
         
         st.markdown("---")
@@ -413,15 +421,16 @@ if uploaded_files:
 
     # --- TOP AREA: GROUPED COMPARISONS ---
     has_groups_plotted = False
+    valid_groups_for_super = []
     
     for g_idx, group in enumerate(st.session_state.file_groups):
-        if g_idx == 0: 
-            continue # Skip Unassigned
-        if not group["items"]: 
-            continue # Skip empty groups
+        if g_idx == 0: continue 
+        if not group["items"]: continue 
+        
+        valid_groups_for_super.append(group["header"])
             
         if not has_groups_plotted:
-            st.header("📈 Grouped Comparisons")
+            st.header("📈 Group Comparisons")
             has_groups_plotted = True
             
         st.subheader(f"{group['header']}")
@@ -431,8 +440,7 @@ if uploaded_files:
         
         for item in group["items"]:
             fname = item.replace("⋮⋮ ", "")
-            if fname not in file_dict: 
-                continue
+            if fname not in file_dict: continue
             
             file = file_dict[fname]
             raw_text = file.getvalue().decode("utf-8", errors="replace")
@@ -465,24 +473,89 @@ if uploaded_files:
             legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99, bgcolor="rgba(0,0,0,0.5)"),
             height=600
         )
-        
-        plot_config_group = {
-            'toImageButtonOptions': {
-                'format': 'png', 
-                'filename': f"Comparison_{group['header'].replace(' ', '_')}", 
-                'height': 600,
-                'width': 1000,
-                'scale': 4 
-            }
-        }
-        st.plotly_chart(fig_comp, use_container_width=True, config=plot_config_group)
+        st.plotly_chart(fig_comp, use_container_width=True)
 
+    # --- NUEVA ZONA: SUPER GROUPS ---
+    st.markdown("---")
+    st.header("🧬 Super Groups (Group of Groups)")
+    st.markdown("Combine entire groups into a single plot. **Each group will be assigned a distinct base color** (e.g. Group 1 in Blues, Group 2 in Reds).")
+
+    if 'num_super_groups' not in st.session_state:
+        st.session_state.num_super_groups = 0
+
+    col_sg1, col_sg2, _ = st.columns([1, 1, 6])
+    with col_sg1:
+        if st.button("➕ Add Super Group"):
+            st.session_state.num_super_groups += 1
+    with col_sg2:
+        if st.session_state.num_super_groups > 0:
+            if st.button("➖ Remove Last"):
+                st.session_state.num_super_groups -= 1
+
+    for sg in range(st.session_state.num_super_groups):
+        with st.expander(f"Super Group {sg+1} Configurations", expanded=True):
+            selected_groups = st.multiselect(
+                "Select basic groups to merge:", 
+                options=valid_groups_for_super, 
+                key=f"super_group_select_{sg}"
+            )
+            
+            if selected_groups:
+                fig_super = go.Figure()
+                
+                for g_idx, g_name in enumerate(selected_groups):
+                    # Encontrar los archivos que pertenecen a este grupo básico
+                    group_data = next(g for g in st.session_state.file_groups if g["header"] == g_name)
+                    
+                    # Asignar una paleta de color principal para todo el grupo
+                    current_palette = SUPER_PALETTES[g_idx % len(SUPER_PALETTES)]
+                    item_idx = 0
+                    
+                    for item in group_data["items"]:
+                        fname = item.replace("⋮⋮ ", "")
+                        if fname not in file_dict: continue
+                        
+                        file = file_dict[fname]
+                        raw_text = file.getvalue().decode("utf-8", errors="replace")
+                        
+                        if instrument.startswith("Gamry"):
+                            _, curves_comp = parse_gamry_dta_multi_curve(raw_text)
+                        else:
+                            _, curves_comp = parse_biologic_mpt(raw_text)
+                            
+                        for cid, df_comp in curves_comp:
+                            Ecol = "Vf" if "Vf" in df_comp.columns else ("Vu" if "Vu" in df_comp.columns else None)
+                            if Ecol and "Im" in df_comp.columns:
+                                dd_comp = df_comp[[Ecol, "Im"]].replace([np.inf, -np.inf], np.nan).dropna()
+                                if len(dd_comp) >= 10:
+                                    trace_name = f"{g_name} | {fname}" if len(curves_comp) == 1 else f"{g_name} | {fname} ({cid})"
+                                    
+                                    # Elegir el tono dentro de la paleta asignada
+                                    color_shade = current_palette[(item_idx * 2) % len(current_palette)]
+                                    
+                                    fig_super.add_trace(go.Scatter(
+                                        x=dd_comp[Ecol], 
+                                        y=dd_comp["Im"], 
+                                        mode='lines',
+                                        name=trace_name,
+                                        line=dict(color=color_shade, width=2)
+                                    ))
+                                    item_idx += 1
+                                    
+                fig_super.update_layout(
+                    title=f"Combined Plot: {', '.join(selected_groups)}",
+                    xaxis_title="E (V vs Ref.)",
+                    yaxis_title="I (A)",
+                    legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99, bgcolor="rgba(0,0,0,0.5)"),
+                    height=700
+                )
+                
+                st.plotly_chart(fig_super, use_container_width=True)
 
     # --- BOTTOM AREA: INDIVIDUAL ANALYSIS ---
     st.markdown("---")
     st.header("📄 Individual Analysis")
 
-    # Flatten the list of files based on their visual ordering across all groups
     actual_file_order = [item.replace("⋮⋮ ", "") for group in st.session_state.file_groups for item in group["items"]]
 
     for file_name in actual_file_order:
@@ -601,17 +674,7 @@ if uploaded_files:
             legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01, bgcolor="rgba(0,0,0,0)")
         )
         
-        plot_config = {
-            'toImageButtonOptions': {
-                'format': 'png', 
-                'filename': f"Plot_{file.name.split('.')[0]}", 
-                'height': 600,
-                'width': 1000,
-                'scale': 4 
-            }
-        }
-        
-        st.plotly_chart(fig, use_container_width=True, config=plot_config)
+        st.plotly_chart(fig, use_container_width=True)
         
         if results_list:
             st.write("**Recommended Operating Ranges:**")
