@@ -359,18 +359,18 @@ if uploaded_files:
     file_dict = {f.name: f for f in uploaded_files}
     display_names = set([f"⋮⋮ {name}" for name in file_dict.keys()])
     
-    # Inicializar estado de grupos múltiples si no existe
+    # Initialize multi-group state
     if 'file_groups' not in st.session_state:
         st.session_state.file_groups = [
             {"header": "📥 Unassigned Files", "items": []},
             {"header": "📊 Group 1", "items": []}
         ]
         
-    # Sincronización: Eliminar archivos que el usuario borró
+    # Sync deleted files
     for group in st.session_state.file_groups:
         group["items"] = [item for item in group["items"] if item in display_names]
         
-    # Sincronización: Añadir archivos nuevos al grupo "Unassigned Files"
+    # Sync new files into Unassigned
     existing_items = set([item for group in st.session_state.file_groups for item in group["items"]])
     new_items = display_names - existing_items
     if new_items:
@@ -389,14 +389,13 @@ if uploaded_files:
                 st.rerun()
         with c2:
             if st.button("➖ Remove Group") and len(st.session_state.file_groups) > 1:
-                # Regresar los archivos del grupo eliminado a "Unassigned"
                 orphans = st.session_state.file_groups[-1]["items"]
                 st.session_state.file_groups[0]["items"].extend(orphans)
                 st.session_state.file_groups.pop()
                 st.rerun()
                 
-        # Interfaz Drag & Drop nativa múltiple!
-        st.session_state.file_groups = sort_items(st.session_state.file_groups)
+        # The crucial fix: multi_containers=True
+        st.session_state.file_groups = sort_items(st.session_state.file_groups, multi_containers=True)
         
         st.markdown("---")
         st.markdown(
@@ -413,14 +412,13 @@ if uploaded_files:
         )
 
     # --- TOP AREA: GROUPED COMPARISONS ---
-    # Iterar sobre todos los grupos (saltando el grupo 0 "Unassigned")
     has_groups_plotted = False
     
     for g_idx, group in enumerate(st.session_state.file_groups):
         if g_idx == 0: 
-            continue # Saltamos la carpeta Unassigned
+            continue # Skip Unassigned
         if not group["items"]: 
-            continue # Saltamos grupos vacíos
+            continue # Skip empty groups
             
         if not has_groups_plotted:
             st.header("📈 Grouped Comparisons")
@@ -484,7 +482,7 @@ if uploaded_files:
     st.markdown("---")
     st.header("📄 Individual Analysis")
 
-    # Aplanar la lista de archivos basándose en cómo están ordenados en TODOS los grupos para mantener el orden visual
+    # Flatten the list of files based on their visual ordering across all groups
     actual_file_order = [item.replace("⋮⋮ ", "") for group in st.session_state.file_groups for item in group["items"]]
 
     for file_name in actual_file_order:
