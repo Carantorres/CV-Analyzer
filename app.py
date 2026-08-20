@@ -225,7 +225,6 @@ def parse_biologic_mpt(raw: str):
     meta = {}
     header_lines = 0
 
-    # Detect header length
     for line in lines:
         if "Nb header lines" in line:
             try:
@@ -234,7 +233,6 @@ def parse_biologic_mpt(raw: str):
                 header_lines = 0
             break
 
-    # Metadata extraction (Handles both ":" and spaced formatting)
     for i in range(min(header_lines, len(lines))):
         line = lines[i].strip()
         if not line:
@@ -248,7 +246,6 @@ def parse_biologic_mpt(raw: str):
             if len(parts) >= 2:
                 meta[parts[0].strip()] = parts[1].strip()
 
-    # Data
     data_lines = [line for line in lines[header_lines:] if line.strip()]
 
     if not data_lines:
@@ -285,7 +282,6 @@ def parse_biologic_mpt(raw: str):
         elif len(parts) > 0:
             rows.append(parts + [np.nan] * (num_cols - len(parts)))
 
-    # Force unique columns
     unique_cols = []
     seen = set()
     for c in cols:
@@ -306,9 +302,6 @@ def parse_biologic_mpt(raw: str):
 
     df = df.replace([np.inf, -np.inf], np.nan).dropna(how="all").reset_index(drop=True)
 
-    # ========================================================
-    # DETECCIÓN DE COLUMNAS E IDENTIFICACIÓN DE CICLOS
-    # ========================================================
     col_map = {}
     for c in df.columns:
         cl = c.lower()
@@ -327,7 +320,6 @@ def parse_biologic_mpt(raw: str):
     if df["Im"].abs().max() > 1:
         df["Im"] = df["Im"] / 1000
 
-    # Dividir datos basado en número de ciclo
     curves = []
     if "Cycle" in df.columns:
         unique_cycles = sorted(df["Cycle"].dropna().unique())
@@ -359,7 +351,7 @@ def convert_df_to_excel(curves_list: List[Tuple[str, pd.DataFrame]]) -> bytes:
 # ============================================================
 # APP LOGIC
 # ============================================================
-uploaded_files = st.file_uploader("Upload CV files", type=["DTA", "dta", "mpt", "MPT"], accept_multiple_files=True)
+uploaded_files = st.file_uploader("Upload CV/LSV files", type=["DTA", "dta", "mpt", "MPT"], accept_multiple_files=True)
 default_colors = px.colors.qualitative.Plotly
 
 if uploaded_files:
@@ -405,17 +397,41 @@ if uploaded_files:
         st.markdown("---")
         raw_text = file.getvalue().decode("utf-8", errors="replace")
         
+        technique = "Unknown Technique"
+
         if instrument.startswith("Gamry"):
             meta, curves = parse_gamry_dta_multi_curve(raw_text)
-            vinit = _to_float(meta.get("VINIT"))
-            vlim1 = _to_float(meta.get("VLIMIT1"))
-            vlim2 = _to_float(meta.get("VLIMIT2"))
+            
+            # Detectar LSV vs CV en Gamry
+            tag = meta.get("TAG", "").upper()
+            if "LSV" in tag or "VFINAL" in meta:
+                technique = "Linear Sweep Voltammetry (LSV)"
+                vinit = _to_float(meta.get("VINIT"))
+                vlim1 = _to_float(meta.get("VFINAL"))
+                vlim2 = None
+            else:
+                technique = "Cyclic Voltammetry (CV)"
+                vinit = _to_float(meta.get("VINIT"))
+                vlim1 = _to_float(meta.get("VLIMIT1"))
+                vlim2 = _to_float(meta.get("VLIMIT2"))
+            
             sr = _to_float(meta.get("SCANRATE"))
+            
         else:
             meta, curves = parse_biologic_mpt(raw_text)
-            vinit = _to_float(meta.get("Ei (V)"))
-            vlim1 = _to_float(meta.get("E1 (V)"))
-            vlim2 = _to_float(meta.get("E2 (V)"))
+            
+            # Detectar LSV vs CV en Biologic
+            if "E2 (V)" in meta:
+                technique = "Cyclic Voltammetry (CV)"
+                vinit = _to_float(meta.get("Ei (V)"))
+                vlim1 = _to_float(meta.get("E1 (V)"))
+                vlim2 = _to_float(meta.get("E2 (V)"))
+            else:
+                technique = "Linear Sweep Voltammetry (LSV)"
+                vinit = _to_float(meta.get("Ei (V)"))
+                vlim1 = _to_float(meta.get("E1 (V)")) or _to_float(meta.get("Ef (V)"))
+                vlim2 = None
+                
             sr = _to_float(meta.get("dE/dt"))
 
         if not curves:
@@ -425,6 +441,8 @@ if uploaded_files:
         col_title, col_btn = st.columns([4, 1])
         with col_title:
             st.subheader(f"📄 Data for: {file.name}")
+            # Mostrar la técnica detectada
+            st.markdown(f"🔬 **Technique Detected:** `{technique}`")
         with col_btn:
             excel_data = convert_df_to_excel(curves)
             st.download_button(
@@ -438,8 +456,15 @@ if uploaded_files:
         
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Initial Potential", f"{vinit} V" if vinit is not None else "N/A")
-        c2.metric("Scan Limit 1", f"{vlim1} V" if vlim1 is not None else "N/A")
-        c3.metric("Scan Limit 2", f"{vlim2} V" if vlim2 is not None else "N/A")
+        
+        # Ajustamos los nombres de los límites si es LSV
+        if technique == "Linear Sweep Voltammetry (LSV)":
+            c2.metric("Final Potential", f"{vlim1} V" if vlim1 is not None else "N/A")
+            c3.metric("Scan Limit 2", "N/A")
+        else:
+            c2.metric("Scan Limit 1", f"{vlim1} V" if vlim1 is not None else "N/A")
+            c3.metric("Scan Limit 2", f"{vlim2} V" if vlim2 is not None else "N/A")
+            
         c4.metric("Scan Rate", f"{sr} mV/s" if sr is not None else "N/A")
 
         fig = go.Figure()
@@ -486,7 +511,7 @@ if uploaded_files:
         plot_config = {
             'toImageButtonOptions': {
                 'format': 'png', 
-                'filename': f"CV_Plot_{file.name.split('.')[0]}", 
+                'filename': f"Plot_{file.name.split('.')[0]}", 
                 'height': 600,
                 'width': 1000,
                 'scale': 4 
