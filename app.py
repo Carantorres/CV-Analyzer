@@ -7,6 +7,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
 from scipy.signal import savgol_filter
+from scipy.stats import linregress
 import streamlit as st
 from streamlit_sortables import sort_items
 
@@ -15,7 +16,7 @@ from streamlit_sortables import sort_items
 # ============================================================
 st.set_page_config(page_title="CV Analyzer", layout="wide")
 st.title("📊 Gamry & Biologic CV Analyzer")
-st.markdown("Upload your **Gamry (.DTA)** or **Biologic (.mpt)** files to visualize potential sweeps and calculate safe operating ranges.")
+st.markdown("Upload your **Gamry (.DTA)** or **Biologic (.mpt)** files to visualize potential sweeps and extract catalytic parameters.")
 
 # ============================================================
 # INSTRUMENT SELECTION
@@ -127,58 +128,104 @@ def recommend_operating_ranges_for_curve(df_curve, baseline_E_window=0.20, smoot
     return {"N_points": N, "noisy_intervals_E": noisy_intervals, "E_cut_cathodic_V": E_cut, "recommended_noise_safe_V": noise_safe, "recommended_reduction_only_V": red_range}
 
 # ============================================================
-# CATALYTIC PARAMETERS & TAFEL FIT
+# CATALYTIC PARAMETERS & ROBUST TAFEL FIT
 # ============================================================
-def extract_lsv_catalytic_parameters(df_curve: pd.DataFrame) -> Tuple[dict, dict]:
+def extract_lsv_catalytic_parameters(df_curve: pd.DataFrame, area_cm2: float, e_rev: float) -> Tuple[dict, dict]:
+    """Extrae parámetros catalíticos incluyendo j vs eta (sobrepotencial) y Tafel."""
     Ecol = "Vf" if "Vf" in df_curve.columns else ("Vu" if "Vu" in df_curve.columns else None)
     if Ecol is None or "Im" not in df_curve.columns:
         return {}, {}
         
-    E = df_curve[Ecol].values
-    I = df_curve["Im"].values
+    df_sorted = df_curve.sort_values(by=Ecol).reset_index(drop=True)
+    E = df_sorted[Ecol].values
+    I = df_sorted["Im"].values
     abs_I = np.abs(I)
     
-    if len(abs_I) < 10:
+    if len(abs_I) < 20:
         return {}, {}
         
-    I_max = np.max(abs_I)
+    # Calcular j (mA/cm2) y eta (mV)
+    j_dens = (abs_I * 1000) / area_cm2
+    eta_mV = np.abs(E - e_rev) * 1000
     
-    onset_mask = abs_I >= 0.10 * I_max
+    I_max = np.max(abs_I)
+    j_max = np.max(j_dens)
+    eta_max = eta_mV[np.argmax(j_dens)]
+    
+    onset_mask = abs_I >= 0.05 * I_max
     E_onset = E[onset_mask][0] if np.any(onset_mask) else np.nan
     
-    tafel_mask = (abs_I >= 0.10 * I_max) & (abs_I <= 0.50 * I_max)
-    E_tafel = E[tafel_mask]
-    I_tafel = abs_I[tafel_mask]
+    # Búsqueda rigurosa de Tafel (R^2 max)
+    search_mask = (abs_I >= 0.02 * I_max) & (abs_I <= 0.40 * I_max)
+    E_search = E[search_mask]
+    I_search = abs_I[search_mask]
     
-    tafel_slope = np.nan
-    slope = np.nan
-    intercept = np.nan
-    log_I_tafel = []
+    best_r2 = -1
+    best_slope = np.nan
+    best_intercept = np.nan
+    best_log_I_fit = []
     
-    if len(E_tafel) > 5:
-        log_I_tafel = np.log10(I_tafel)
-        try:
-            slope, intercept = np.polyfit(log_I_tafel, E_tafel, 1)
-            tafel_slope = abs(slope * 1000) 
-        except Exception:
-            pass
+    if len(E_search) > 10:
+        log_I_search = np.log10(I_search)
+        win_size = max(10, len(E_search) // 5) 
+        
+        for i in range(len(E_search) - win_size):
+            x_win = log_I_search[i:i+win_size]
+            y_win = E_search[i:i+win_size]
             
+            slope, intercept, r_value, _, _ = linregress(x_win, y_win)
+            r2 = r_value**2
+            
+            if r2 > best_r2 and not np.isnan(r2):
+                best_r2 = r2
+                best_slope = slope
+                best_intercept = intercept
+                best_log_I_fit = x_win
+
+    tafel_slope = abs(best_slope * 1000) if not np.isnan(best_slope) else np.nan
+            
+    # Extraer sobrepotenciales a j = 10, 20, 50, 100
+    sort_idx = np.argsort(j_dens)
+    j_sorted = j_dens[sort_idx]
+    eta_sorted = eta_mV[sort_idx]
+    
+    etas = {}
+    for target in [10, 20, 50, 100]:
+        if target <= j_max:
+            etas[f"η_{target} (mV)"] = np.interp(target, j_sorted, eta_sorted)
+        else:
+            etas[f"η_{target} (mV)"] = np.nan
+
+    if j_max < 100:
+        etas[f"η_max@{j_max:.1f} (mV)"] = eta_max
+
     params = {
-        "|I_max| (A)": I_max,
+        "j_max (mA/cm²)": j_max,
         "E_onset (V)": E_onset,
-        "Tafel Slope (mV/dec)": tafel_slope
+        "Tafel Slope (mV/dec)": tafel_slope,
+        "Tafel R²": best_r2 if best_r2 != -1 else np.nan,
+        **etas
     }
     
-    valid_I = abs_I > 0
-    log_I_full = np.full_like(abs_I, np.nan, dtype=float)
-    log_I_full[valid_I] = np.log10(abs_I[valid_I])
+    try:
+        win_len = min(31, len(abs_I) - 1 if len(abs_I) % 2 == 0 else len(abs_I))
+        win_len = win_len if win_len % 2 == 1 else win_len - 1
+        I_smooth = savgol_filter(abs_I, window_length=max(5, win_len), polyorder=2)
+    except:
+        I_smooth = abs_I
+        
+    I_smooth = np.where(I_smooth <= 0, 1e-12, I_smooth) 
+    log_I_full_visual = np.log10(I_smooth)
     
     fit_data = {
         "E_full": E,
-        "log_I_full": log_I_full,
-        "log_I_fit": log_I_tafel,
-        "slope": slope,
-        "intercept": intercept
+        "log_I_full": log_I_full_visual,
+        "log_I_fit": best_log_I_fit,
+        "slope": best_slope,
+        "intercept": best_intercept,
+        "log_I_max": np.log10(I_max) if I_max > 0 else 0,
+        "j_dens": j_dens,
+        "eta_mV": eta_mV
     }
     
     return params, fit_data
@@ -421,6 +468,14 @@ SUPER_PALETTES = [
     px.colors.sequential.Greys[::-1]
 ]
 
+# Side bar configs before main logic
+with st.sidebar:
+    st.header("⚙️ Catalytic Parameters")
+    st.markdown("Set these values to accurately calculate Current Density ($j$) and Overpotential ($\eta$).")
+    electrode_area = st.number_input("Electrode Area (cm²)", min_value=0.0001, value=1.000, step=0.1)
+    e_rev = st.number_input("Thermodynamic Potential (E_rev vs Ref)", value=0.000, step=0.01, help="Used to calculate Overpotential: η = |E - E_rev|")
+    st.markdown("---")
+
 if uploaded_files:
     file_dict = {f.name: f for f in uploaded_files}
     display_names = set([f"⋮⋮ {name}" for name in file_dict.keys()])
@@ -491,9 +546,12 @@ if uploaded_files:
         
         fig_comp = go.Figure()
         fig_tafel_comp = go.Figure()
+        fig_jeta_comp = go.Figure() # Nuevo gráfico para j vs eta
+        
         trace_idx = 0
         group_lsv_params = [] 
         is_group_lsv = False
+        max_log_I_global = -10 
         
         for item in group["items"]:
             fname = item.replace("⋮⋮ ", "")
@@ -534,11 +592,13 @@ if uploaded_files:
                         
                         if technique_group == "LSV":
                             is_group_lsv = True
-                            cat_params, fit_data = extract_lsv_catalytic_parameters(dd_comp)
+                            cat_params, fit_data = extract_lsv_catalytic_parameters(dd_comp, electrode_area, e_rev)
                             if cat_params:
                                 cat_params = {"File": fname, "Curve": cid, **cat_params} 
                                 group_lsv_params.append(cat_params)
+                                max_log_I_global = max(max_log_I_global, fit_data["log_I_max"])
                                 
+                                # Tafel Plot Group
                                 fig_tafel_comp.add_trace(go.Scatter(
                                     x=fit_data["log_I_full"],
                                     y=fit_data["E_full"],
@@ -547,16 +607,12 @@ if uploaded_files:
                                     line=dict(color=c_color, width=2)
                                 ))
                                 
-                                # Trazar línea de ajuste extrapolada con valor en leyenda
                                 if not np.isnan(fit_data["slope"]) and len(fit_data["log_I_fit"]) > 0:
                                     min_x = np.min(fit_data["log_I_fit"])
                                     max_x = np.max(fit_data["log_I_fit"])
                                     span = max_x - min_x
-                                    
-                                    # Extrapolar la línea un poco más allá de la zona de ajuste para visualizar la tangente
                                     fit_x = np.array([min_x - (span*1.5), max_x + (span*1.5)])
                                     fit_y = fit_data["slope"] * fit_x + fit_data["intercept"]
-                                    
                                     tafel_val = cat_params["Tafel Slope (mV/dec)"]
                                     
                                     fig_tafel_comp.add_trace(go.Scatter(
@@ -566,33 +622,60 @@ if uploaded_files:
                                         name=f"Fit: {tafel_val:.1f} mV/dec",
                                         line=dict(color=c_color, width=2, dash='dot')
                                     ))
+
+                                # j vs eta Group
+                                fig_jeta_comp.add_trace(go.Scatter(
+                                    x=fit_data["eta_mV"],
+                                    y=fit_data["j_dens"],
+                                    mode='lines',
+                                    name=trace_name,
+                                    line=dict(color=c_color, width=2)
+                                ))
                         
         fig_comp.update_layout(
+            title="Raw Data (E vs I)",
             xaxis_title="E (V vs Ref.)",
             yaxis_title="I (A)",
             legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99, bgcolor="rgba(0,0,0,0.5)"),
-            height=600
+            height=500
         )
         st.plotly_chart(fig_comp, use_container_width=True)
         
         if is_group_lsv:
-            fig_tafel_comp.update_layout(
-                title="Tafel Plot Comparison (log₁₀|I| vs E)",
-                xaxis_title="log₁₀|I| (A)",
-                yaxis_title="E (V vs Ref.)",
-                legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99, bgcolor="rgba(0,0,0,0.5)"),
-                height=600
-            )
-            st.plotly_chart(fig_tafel_comp, use_container_width=True)
+            c1, c2 = st.columns(2)
+            with c1:
+                fig_jeta_comp.update_layout(
+                    title="Catalytic Performance (j vs η)",
+                    xaxis_title="Overpotential η (mV)",
+                    yaxis_title="Current Density j (mA/cm²)",
+                    legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99, bgcolor="rgba(0,0,0,0.5)"),
+                    height=500
+                )
+                st.plotly_chart(fig_jeta_comp, use_container_width=True)
+                
+            with c2:
+                fig_tafel_comp.update_layout(
+                    title="Tafel Plot (log₁₀|I| vs E)",
+                    xaxis_title="log₁₀|I| (A)",
+                    yaxis_title="E (V vs Ref.)",
+                    xaxis=dict(range=[max_log_I_global - 4.5, max_log_I_global + 0.2]),
+                    legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99, bgcolor="rgba(0,0,0,0.5)"),
+                    height=500
+                )
+                st.plotly_chart(fig_tafel_comp, use_container_width=True)
         
+        # --- TABLA DE ESTADÍSTICAS DEL GRUPO ---
         if group_lsv_params:
             st.markdown("#### 🧪 Group Catalytic Statistics (LSV)")
-            st.info("ℹ️ **Heurística de Cálculo:** $E_{onset}$ se calcula dinámicamente al 10% de $|I_{max}|$. La Pendiente de Tafel se ajusta mediante regresión lineal en la ventana entre el 10% y el 50% de $|I_{max}|$ (representado por las líneas punteadas).")
+            st.info(f"ℹ️ **Cálculo Robusto de Tafel:** Evaluado dinámicamente mediante regresión de ventana deslizante para localizar el máximo $R^2$. Evaluado con un área de **{electrode_area} cm²** y un **E_rev = {e_rev} V**.")
             
             df_cat = pd.DataFrame(group_lsv_params)
             summary = []
             
-            for col in ["|I_max| (A)", "E_onset (V)", "Tafel Slope (mV/dec)"]:
+            # Dinámicamente identificar todas las columnas numéricas relevantes para hacer el resumen
+            cols_to_summarize = ["j_max (mA/cm²)", "E_onset (V)", "Tafel Slope (mV/dec)", "Tafel R²"] + [c for c in df_cat.columns if c.startswith("η_")]
+            
+            for col in cols_to_summarize:
                 if col in df_cat.columns:
                     mean_v = df_cat[col].mean()
                     std_v = df_cat[col].std()
@@ -640,6 +723,8 @@ if uploaded_files:
             
             if selected_groups:
                 fig_super = go.Figure()
+                fig_super_jeta = go.Figure()
+                is_sg_lsv = False
                 
                 for g_idx, g_name in enumerate(selected_groups):
                     group_data = next(g for g in st.session_state.file_groups if g["header"] == g_name)
@@ -653,10 +738,15 @@ if uploaded_files:
                         file = file_dict[fname]
                         raw_text = file.getvalue().decode("utf-8", errors="replace")
                         
+                        tech_sg = "Unknown"
                         if instrument.startswith("Gamry"):
                             _, curves_comp = parse_gamry_dta_multi_curve(raw_text)
+                            if "LSV" in meta.get("TAG", "").upper() or "LINEAR" in meta.get("TITLE", "").upper():
+                                tech_sg = "LSV"
                         else:
                             _, curves_comp = parse_biologic_mpt(raw_text)
+                            if not "E2 (V)" in meta:
+                                tech_sg = "LSV"
                             
                         for cid, df_comp in curves_comp:
                             Ecol = "Vf" if "Vf" in df_comp.columns else ("Vu" if "Vu" in df_comp.columns else None)
@@ -673,17 +763,42 @@ if uploaded_files:
                                         name=trace_name,
                                         line=dict(color=color_shade, width=2)
                                     ))
+                                    
+                                    if tech_sg == "LSV":
+                                        is_sg_lsv = True
+                                        cat_params, fit_data = extract_lsv_catalytic_parameters(dd_comp, electrode_area, e_rev)
+                                        fig_super_jeta.add_trace(go.Scatter(
+                                            x=fit_data["eta_mV"],
+                                            y=fit_data["j_dens"],
+                                            mode='lines',
+                                            name=trace_name,
+                                            line=dict(color=color_shade, width=2)
+                                        ))
+                                        
                                     item_idx += 1
                                     
                 fig_super.update_layout(
-                    title=f"Combined Plot: {', '.join(selected_groups)}",
+                    title=f"Combined Raw Plot: {', '.join(selected_groups)}",
                     xaxis_title="E (V vs Ref.)",
                     yaxis_title="I (A)",
                     legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99, bgcolor="rgba(0,0,0,0.5)"),
-                    height=700
+                    height=600
                 )
                 
-                st.plotly_chart(fig_super, use_container_width=True)
+                if is_sg_lsv:
+                    c1, c2 = st.columns(2)
+                    with c1: st.plotly_chart(fig_super, use_container_width=True)
+                    with c2:
+                        fig_super_jeta.update_layout(
+                            title=f"Combined j vs η: {', '.join(selected_groups)}",
+                            xaxis_title="Overpotential η (mV)",
+                            yaxis_title="Current Density j (mA/cm²)",
+                            legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99, bgcolor="rgba(0,0,0,0.5)"),
+                            height=600
+                        )
+                        st.plotly_chart(fig_super_jeta, use_container_width=True)
+                else:
+                    st.plotly_chart(fig_super, use_container_width=True)
 
     # --- BOTTOM AREA: INDIVIDUAL ANALYSIS ---
     st.markdown("---")
@@ -702,10 +817,8 @@ if uploaded_files:
 
         if instrument.startswith("Gamry"):
             meta, curves = parse_gamry_dta_multi_curve(raw_text)
-            
             tag = meta.get("TAG", "").upper()
             title = meta.get("TITLE", "").upper()
-            
             if "LSV" in tag or "LINEAR" in title:
                 technique = "Linear Sweep Voltammetry (LSV)"
                 vinit = _to_float(meta.get("VINIT"))
@@ -716,12 +829,10 @@ if uploaded_files:
                 vinit = _to_float(meta.get("VINIT"))
                 vlim1 = _to_float(meta.get("VLIMIT1"))
                 vlim2 = _to_float(meta.get("VLIMIT2"))
-            
             sr = _to_float(meta.get("SCANRATE"))
             
         else:
             meta, curves = parse_biologic_mpt(raw_text)
-            
             if "E2 (V)" in meta:
                 technique = "Cyclic Voltammetry (CV)"
                 vinit = _to_float(meta.get("Ei (V)"))
@@ -732,7 +843,6 @@ if uploaded_files:
                 vinit = _to_float(meta.get("Ei (V)"))
                 vlim1 = _to_float(meta.get("E1 (V)")) or _to_float(meta.get("Ef (V)"))
                 vlim2 = None
-                
             sr = _to_float(meta.get("dE/dt"))
 
         if not curves:
@@ -768,8 +878,10 @@ if uploaded_files:
 
         fig = go.Figure()
         fig_tafel = go.Figure()
+        fig_jeta = go.Figure() # Nuevo gráfico para j vs eta
         results_list = []
         lsv_cat_list = [] 
+        max_log_I_ind = -10
         
         for i, (cid, dfi) in enumerate(curves):
             Ecol = "Vf" if "Vf" in dfi.columns else ("Vu" if "Vu" in dfi.columns else None)
@@ -804,10 +916,11 @@ if uploaded_files:
             })
             
             if technique == "Linear Sweep Voltammetry (LSV)":
-                cat_params, fit_data = extract_lsv_catalytic_parameters(dd)
+                cat_params, fit_data = extract_lsv_catalytic_parameters(dd, electrode_area, e_rev)
                 if cat_params:
                     cat_params = {"Curve": cid, **cat_params}
                     lsv_cat_list.append(cat_params)
+                    max_log_I_ind = max(max_log_I_ind, fit_data["log_I_max"])
                     
                     fig_tafel.add_trace(go.Scatter(
                         x=fit_data["log_I_full"], 
@@ -817,42 +930,62 @@ if uploaded_files:
                         line=dict(color=line_color, width=2)
                     ))
                     
-                    # Trazar línea de ajuste extrapolada
                     if not np.isnan(fit_data["slope"]) and len(fit_data["log_I_fit"]) > 0:
                         min_x = np.min(fit_data["log_I_fit"])
                         max_x = np.max(fit_data["log_I_fit"])
                         span = max_x - min_x
-                        
                         fit_x = np.array([min_x - (span*1.5), max_x + (span*1.5)])
                         fit_y = fit_data["slope"] * fit_x + fit_data["intercept"]
-                        
                         tafel_val = cat_params["Tafel Slope (mV/dec)"]
                         
                         fig_tafel.add_trace(go.Scatter(
                             x=fit_x, 
                             y=fit_y, 
                             mode='lines',
-                            name=f"{cid} Fit ({tafel_val:.1f} mV/dec)", 
+                            name=f"Fit: {tafel_val:.1f} mV/dec", 
                             line=dict(color=line_color, width=2, dash='dot')
                         ))
+                        
+                    # Gráfico de j vs eta
+                    fig_jeta.add_trace(go.Scatter(
+                        x=fit_data["eta_mV"], 
+                        y=fit_data["j_dens"], 
+                        mode='lines',
+                        name=cid, 
+                        line=dict(color=line_color, width=2)
+                    ))
 
         fig.update_layout(
+            title="Raw Data (E vs I)",
             xaxis_title="E (V vs Ref.)",
             yaxis_title="I (A)",
-            legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01, bgcolor="rgba(0,0,0,0)")
+            legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01, bgcolor="rgba(0,0,0,0)"),
+            height=500
         )
-        
         st.plotly_chart(fig, use_container_width=True)
         
         if technique == "Linear Sweep Voltammetry (LSV)" and lsv_cat_list:
-            fig_tafel.update_layout(
-                title="Tafel Plot (log₁₀|I| vs E)",
-                xaxis_title="log₁₀|I| (A)",
-                yaxis_title="E (V vs Ref.)",
-                legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99, bgcolor="rgba(0,0,0,0.5)"),
-                height=500
-            )
-            st.plotly_chart(fig_tafel, use_container_width=True)
+            c1, c2 = st.columns(2)
+            with c1:
+                fig_jeta.update_layout(
+                    title="Catalytic Performance (j vs η)",
+                    xaxis_title="Overpotential η (mV)",
+                    yaxis_title="Current Density j (mA/cm²)",
+                    legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99, bgcolor="rgba(0,0,0,0.5)"),
+                    height=500
+                )
+                st.plotly_chart(fig_jeta, use_container_width=True)
+                
+            with c2:
+                fig_tafel.update_layout(
+                    title="Tafel Plot (log₁₀|I| vs E)",
+                    xaxis_title="log₁₀|I| (A)",
+                    yaxis_title="E (V vs Ref.)",
+                    xaxis=dict(range=[max_log_I_ind - 4.5, max_log_I_ind + 0.2]),
+                    legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99, bgcolor="rgba(0,0,0,0.5)"),
+                    height=500
+                )
+                st.plotly_chart(fig_tafel, use_container_width=True)
         
         if results_list:
             st.write("**Recommended Operating Ranges:**")
