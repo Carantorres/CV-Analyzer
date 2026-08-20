@@ -9,6 +9,7 @@ import plotly.express as px
 from scipy.signal import savgol_filter
 from scipy.stats import linregress
 import streamlit as st
+import streamlit.components.v1 as components
 from streamlit_sortables import sort_items
 
 # ============================================================
@@ -483,11 +484,44 @@ with st.sidebar:
     st.markdown("---")
     st.header("⚙️ Catalytic Parameters")
     st.markdown("Set these values to accurately calculate Current Density ($j$) and Overpotential ($\eta$).")
-    electrode_area = st.number_input("Electrode Area (cm²)", min_value=0.0001, value=1.000, step=0.1)
+    
+    # FORMAT UPDATED TO %.5f FOR INCREASED PRECISION
+    electrode_area = st.number_input("Electrode Area (cm²)", min_value=0.00001, value=1.00000, step=0.001, format="%.5f")
     
     if convert_to_rhe:
         st.info("💡 **Tip:** Since you are converting to RHE, E_rev is generally **0.0 V** for HER and **1.23 V** for OER.")
     e_rev = st.number_input("Thermodynamic Potential (E_rev)", value=0.000, step=0.01, help="Used to calculate Overpotential: η = |E - E_rev|")
+    
+    st.markdown("---")
+    st.header("📄 Export Full Report")
+    st.markdown("Save this entire dashboard exactly as it appears into a multi-page PDF.")
+    
+    # HTML INJECTION FOR NATIVE PDF PRINTING
+    components.html(
+        """
+        <script>
+        function printPage() {
+            window.parent.print();
+        }
+        </script>
+        <button onclick="printPage()" style="
+            background-color: #FF4B4B;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            padding: 0.5rem 1rem;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            width: 100%;
+            font-family: 'Source Sans Pro', sans-serif;
+        ">
+            🖨️ Save Page as PDF
+        </button>
+        """,
+        height=50
+    )
+    
     st.markdown("---")
 
 if uploaded_files:
@@ -681,6 +715,8 @@ if uploaded_files:
         
         if group_lsv_params:
             st.markdown("#### 🧪 Group Catalytic Statistics (LSV)")
+            st.info(f"ℹ️ **Cálculo Robusto de Tafel:** Evaluado dinámicamente mediante regresión de ventana deslizante para localizar el máximo $R^2$. Evaluado con un área de **{electrode_area} cm²** y un **E_rev = {e_rev} V**.")
+            
             df_cat = pd.DataFrame(group_lsv_params)
             summary = []
             
@@ -705,7 +741,6 @@ if uploaded_files:
             with st.expander(f"View raw catalytic data for {group['header']}"):
                 st.dataframe(df_cat, use_container_width=True)
             st.markdown("<br>", unsafe_allow_html=True)
-
 
     # --- ZONA: SUPER GROUPS ---
     st.markdown("---")
@@ -752,7 +787,9 @@ if uploaded_files:
                         tech_sg = "Unknown"
                         if instrument.startswith("Gamry"):
                             _, curves_comp = parse_gamry_dta_multi_curve(raw_text)
-                            if "LSV" in meta.get("TAG", "").upper() or "LINEAR" in meta.get("TITLE", "").upper():
+                            tag = meta.get("TAG", "").upper()
+                            title = meta.get("TITLE", "").upper()
+                            if "LSV" in tag or "LINEAR" in title:
                                 tech_sg = "LSV"
                         else:
                             _, curves_comp = parse_biologic_mpt(raw_text)
