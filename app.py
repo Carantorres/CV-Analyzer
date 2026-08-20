@@ -127,6 +127,49 @@ def recommend_operating_ranges_for_curve(df_curve, baseline_E_window=0.20, smoot
     return {"N_points": N, "noisy_intervals_E": noisy_intervals, "E_cut_cathodic_V": E_cut, "recommended_noise_safe_V": noise_safe, "recommended_reduction_only_V": red_range}
 
 # ============================================================
+# CATALYTIC PARAMETERS FUNCTION
+# ============================================================
+def extract_lsv_catalytic_parameters(df_curve: pd.DataFrame) -> dict:
+    """Extrae parámetros catalíticos básicos (E_onset, Tafel Slope, I_max) de una LSV."""
+    Ecol = "Vf" if "Vf" in df_curve.columns else ("Vu" if "Vu" in df_curve.columns else None)
+    if Ecol is None or "Im" not in df_curve.columns:
+        return {}
+        
+    E = df_curve[Ecol].values
+    I = df_curve["Im"].values
+    abs_I = np.abs(I)
+    
+    if len(abs_I) < 10:
+        return {}
+        
+    I_max = np.max(abs_I)
+    
+    # Onset heurístico: 10% de la corriente máxima
+    onset_mask = abs_I >= 0.10 * I_max
+    E_onset = E[onset_mask][0] if np.any(onset_mask) else np.nan
+    
+    # Zona de Tafel heurística: entre el 10% y el 50% de la corriente máxima
+    tafel_mask = (abs_I >= 0.10 * I_max) & (abs_I <= 0.50 * I_max)
+    E_tafel = E[tafel_mask]
+    I_tafel = abs_I[tafel_mask]
+    
+    tafel_slope = np.nan
+    if len(E_tafel) > 5:
+        log_I = np.log10(I_tafel)
+        try:
+            # Ajuste lineal E = a + b * log10(|I|). La pendiente "b" es la pendiente de Tafel
+            slope, _ = np.polyfit(log_I, E_tafel, 1)
+            tafel_slope = abs(slope * 1000) # Convertir de V/dec a mV/dec
+        except Exception:
+            pass
+            
+    return {
+        "|I_max| (A)": I_max,
+        "E_onset (V)": E_onset,
+        "Tafel Slope (mV/dec)": tafel_slope
+    }
+
+# ============================================================
 # PARSERS
 # ============================================================
 def parse_gamry_dta_multi_curve(raw: str) -> Tuple[Dict[str, str], List[Tuple[str, pd.DataFrame]]]:
@@ -355,7 +398,6 @@ uploaded_files = st.file_uploader("Upload CV/LSV files", type=["DTA", "dta", "mp
 default_colors = px.colors.qualitative.Plotly
 combined_palette = px.colors.qualitative.Alphabet + px.colors.qualitative.Plotly 
 
-# Definimos paletas por color base para los super grupos (invertimos para que arranquen oscuros)
 SUPER_PALETTES = [
     px.colors.sequential.Blues[::-1],  
     px.colors.sequential.Reds[::-1],   
@@ -369,14 +411,12 @@ if uploaded_files:
     file_dict = {f.name: f for f in uploaded_files}
     display_names = set([f"⋮⋮ {name}" for name in file_dict.keys()])
     
-    # Init main drag and drop groups
     if 'file_groups' not in st.session_state:
         st.session_state.file_groups = [
             {"header": "📥 Unassigned Files", "items": []},
             {"header": "📊 Group 1", "items": []}
         ]
         
-    # Sync files
     for group in st.session_state.file_groups:
         group["items"] = [item for item in group["items"] if item in display_names]
         
@@ -437,6 +477,7 @@ if uploaded_files:
         
         fig_comp = go.Figure()
         trace_idx = 0
+        group_lsv_params = [] # Lista para almacenar parámetros catalíticos del grupo
         
         for item in group["items"]:
             fname = item.replace("⋮⋮ ", "")
@@ -445,10 +486,18 @@ if uploaded_files:
             file = file_dict[fname]
             raw_text = file.getvalue().decode("utf-8", errors="replace")
             
+            technique_group = "Unknown Technique"
+            
             if instrument.startswith("Gamry"):
-                _, curves_comp = parse_gamry_dta_multi_curve(raw_text)
+                meta_g, curves_comp = parse_gamry_dta_multi_curve(raw_text)
+                tag_g = meta_g.get("TAG", "").upper()
+                title_g = meta_g.get("TITLE", "").upper()
+                if "LSV" in tag_g or "LINEAR" in title_g:
+                    technique_group = "LSV"
             else:
-                _, curves_comp = parse_biologic_mpt(raw_text)
+                meta_g, curves_comp = parse_biologic_mpt(raw_text)
+                if not "E2 (V)" in meta_g:
+                    technique_group = "LSV"
                 
             for cid, df_comp in curves_comp:
                 Ecol = "Vf" if "Vf" in df_comp.columns else ("Vu" if "Vu" in df_comp.columns else None)
@@ -467,6 +516,13 @@ if uploaded_files:
                         ))
                         trace_idx += 1
                         
+                        # Extraer parámetros si es LSV
+                        if technique_group == "LSV":
+                            cat_params = extract_lsv_catalytic_parameters(dd_comp)
+                            if cat_params:
+                                cat_params = {"File": fname, "Curve": cid, **cat_params} # Reordenar para que archivo quede primero
+                                group_lsv_params.append(cat_params)
+                        
         fig_comp.update_layout(
             xaxis_title="E (V vs Ref.)",
             yaxis_title="I (A)",
@@ -474,6 +530,35 @@ if uploaded_files:
             height=600
         )
         st.plotly_chart(fig_comp, use_container_width=True)
+        
+        # --- TABLA DE ESTADÍSTICAS DEL GRUPO (SOLO LSV) ---
+        if group_lsv_params:
+            st.markdown("#### 🧪 Group Catalytic Statistics (LSV)")
+            st.info("ℹ️ **Heurística de Cálculo:** $E_{onset}$ se calcula dinámicamente al 10% de $|I_{max}|$. La Pendiente de Tafel se ajusta mediante regresión lineal en la ventana entre el 10% y el 50% de $|I_{max}|$.")
+            
+            df_cat = pd.DataFrame(group_lsv_params)
+            summary = []
+            
+            for col in ["|I_max| (A)", "E_onset (V)", "Tafel Slope (mV/dec)"]:
+                if col in df_cat.columns:
+                    mean_v = df_cat[col].mean()
+                    std_v = df_cat[col].std()
+                    n_v = df_cat[col].notna().sum()
+                    rsd_v = (std_v / abs(mean_v) * 100) if (pd.notna(mean_v) and mean_v != 0) else np.nan
+                    
+                    summary.append({
+                        "Parameter": col,
+                        "Mean": round(mean_v, 6) if pd.notna(mean_v) else "N/A",
+                        "Std Dev (±)": round(std_v, 6) if pd.notna(std_v) else "N/A",
+                        "RSD (%)": round(rsd_v, 2) if pd.notna(rsd_v) else "N/A",
+                        "Count (n)": int(n_v)
+                    })
+            
+            st.dataframe(pd.DataFrame(summary), use_container_width=True)
+            with st.expander(f"View raw catalytic data for {group['header']}"):
+                st.dataframe(df_cat, use_container_width=True)
+            st.markdown("<br>", unsafe_allow_html=True)
+
 
     # --- NUEVA ZONA: SUPER GROUPS ---
     st.markdown("---")
@@ -504,10 +589,7 @@ if uploaded_files:
                 fig_super = go.Figure()
                 
                 for g_idx, g_name in enumerate(selected_groups):
-                    # Encontrar los archivos que pertenecen a este grupo básico
                     group_data = next(g for g in st.session_state.file_groups if g["header"] == g_name)
-                    
-                    # Asignar una paleta de color principal para todo el grupo
                     current_palette = SUPER_PALETTES[g_idx % len(SUPER_PALETTES)]
                     item_idx = 0
                     
@@ -529,8 +611,6 @@ if uploaded_files:
                                 dd_comp = df_comp[[Ecol, "Im"]].replace([np.inf, -np.inf], np.nan).dropna()
                                 if len(dd_comp) >= 10:
                                     trace_name = f"{g_name} | {fname}" if len(curves_comp) == 1 else f"{g_name} | {fname} ({cid})"
-                                    
-                                    # Elegir el tono dentro de la paleta asignada
                                     color_shade = current_palette[(item_idx * 2) % len(current_palette)]
                                     
                                     fig_super.add_trace(go.Scatter(
@@ -635,6 +715,7 @@ if uploaded_files:
 
         fig = go.Figure()
         results_list = []
+        lsv_cat_list = [] # Nueva lista para parámetros catalíticos individuales
         
         for i, (cid, dfi) in enumerate(curves):
             Ecol = "Vf" if "Vf" in dfi.columns else ("Vu" if "Vu" in dfi.columns else None)
@@ -667,6 +748,13 @@ if uploaded_files:
                 "Reduction Min (V)": round(ro[0], 4) if ro else None,
                 "Reduction Max (V)": round(ro[1], 4) if ro else None,
             })
+            
+            # Extraer parámetros si es LSV individual
+            if technique == "Linear Sweep Voltammetry (LSV)":
+                cat_params = extract_lsv_catalytic_parameters(dd)
+                if cat_params:
+                    cat_params = {"Curve": cid, **cat_params}
+                    lsv_cat_list.append(cat_params)
 
         fig.update_layout(
             xaxis_title="E (V vs Ref.)",
@@ -676,8 +764,14 @@ if uploaded_files:
         
         st.plotly_chart(fig, use_container_width=True)
         
+        # Muestra la tabla de parámetros de voltaje
         if results_list:
             st.write("**Recommended Operating Ranges:**")
             st.dataframe(pd.DataFrame(results_list), use_container_width=True)
+            
+        # Muestra la tabla catalítica si es LSV
+        if lsv_cat_list:
+            st.write("**🧪 Catalytic Parameters:**")
+            st.dataframe(pd.DataFrame(lsv_cat_list), use_container_width=True)
             
         st.markdown("<br><br>", unsafe_allow_html=True)
