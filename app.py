@@ -127,47 +127,66 @@ def recommend_operating_ranges_for_curve(df_curve, baseline_E_window=0.20, smoot
     return {"N_points": N, "noisy_intervals_E": noisy_intervals, "E_cut_cathodic_V": E_cut, "recommended_noise_safe_V": noise_safe, "recommended_reduction_only_V": red_range}
 
 # ============================================================
-# CATALYTIC PARAMETERS FUNCTION
+# CATALYTIC PARAMETERS & TAFEL FIT
 # ============================================================
-def extract_lsv_catalytic_parameters(df_curve: pd.DataFrame) -> dict:
-    """Extrae parámetros catalíticos básicos (E_onset, Tafel Slope, I_max) de una LSV."""
+def extract_lsv_catalytic_parameters(df_curve: pd.DataFrame) -> Tuple[dict, dict]:
+    """Extrae parámetros catalíticos y devuelve datos para graficar la curva de Tafel y su ajuste lineal."""
     Ecol = "Vf" if "Vf" in df_curve.columns else ("Vu" if "Vu" in df_curve.columns else None)
     if Ecol is None or "Im" not in df_curve.columns:
-        return {}
+        return {}, {}
         
     E = df_curve[Ecol].values
     I = df_curve["Im"].values
     abs_I = np.abs(I)
     
     if len(abs_I) < 10:
-        return {}
+        return {}, {}
         
     I_max = np.max(abs_I)
     
-    # Onset heurístico: 10% de la corriente máxima
+    # Onset: 10% de la corriente máxima
     onset_mask = abs_I >= 0.10 * I_max
     E_onset = E[onset_mask][0] if np.any(onset_mask) else np.nan
     
-    # Zona de Tafel heurística: entre el 10% y el 50% de la corriente máxima
+    # Zona de Tafel: entre 10% y 50% de la corriente máxima
     tafel_mask = (abs_I >= 0.10 * I_max) & (abs_I <= 0.50 * I_max)
     E_tafel = E[tafel_mask]
     I_tafel = abs_I[tafel_mask]
     
     tafel_slope = np.nan
+    slope = np.nan
+    intercept = np.nan
+    log_I_tafel = []
+    
     if len(E_tafel) > 5:
-        log_I = np.log10(I_tafel)
+        log_I_tafel = np.log10(I_tafel)
         try:
-            # Ajuste lineal E = a + b * log10(|I|). La pendiente "b" es la pendiente de Tafel
-            slope, _ = np.polyfit(log_I, E_tafel, 1)
-            tafel_slope = abs(slope * 1000) # Convertir de V/dec a mV/dec
+            # Regresión Lineal: E = slope * log10(|I|) + intercept
+            slope, intercept = np.polyfit(log_I_tafel, E_tafel, 1)
+            tafel_slope = abs(slope * 1000) # mV/dec
         except Exception:
             pass
             
-    return {
+    params = {
         "|I_max| (A)": I_max,
         "E_onset (V)": E_onset,
         "Tafel Slope (mV/dec)": tafel_slope
     }
+    
+    # Calcular el logaritmo solo para corrientes mayores a 0 para el gráfico completo
+    valid_I = abs_I > 0
+    log_I_full = np.full_like(abs_I, np.nan, dtype=float)
+    log_I_full[valid_I] = np.log10(abs_I[valid_I])
+    
+    fit_data = {
+        "E_full": E,
+        "log_I_full": log_I_full,
+        "log_I_fit": log_I_tafel,
+        "slope": slope,
+        "intercept": intercept
+    }
+    
+    return params, fit_data
 
 # ============================================================
 # PARSERS
@@ -476,8 +495,10 @@ if uploaded_files:
         st.subheader(f"{group['header']}")
         
         fig_comp = go.Figure()
+        fig_tafel_comp = go.Figure() # Nuevo gráfico para el Tafel del grupo
         trace_idx = 0
-        group_lsv_params = [] # Lista para almacenar parámetros catalíticos del grupo
+        group_lsv_params = [] 
+        is_group_lsv = False
         
         for item in group["items"]:
             fname = item.replace("⋮⋮ ", "")
@@ -516,12 +537,34 @@ if uploaded_files:
                         ))
                         trace_idx += 1
                         
-                        # Extraer parámetros si es LSV
                         if technique_group == "LSV":
-                            cat_params = extract_lsv_catalytic_parameters(dd_comp)
+                            is_group_lsv = True
+                            cat_params, fit_data = extract_lsv_catalytic_parameters(dd_comp)
                             if cat_params:
-                                cat_params = {"File": fname, "Curve": cid, **cat_params} # Reordenar para que archivo quede primero
+                                cat_params = {"File": fname, "Curve": cid, **cat_params} 
                                 group_lsv_params.append(cat_params)
+                                
+                                # Trazar la curva en escala logarítmica
+                                fig_tafel_comp.add_trace(go.Scatter(
+                                    x=fit_data["log_I_full"],
+                                    y=fit_data["E_full"],
+                                    mode='lines',
+                                    name=trace_name,
+                                    line=dict(color=c_color, width=2)
+                                ))
+                                
+                                # Trazar la línea punteada del ajuste de Tafel
+                                if not np.isnan(fit_data["slope"]):
+                                    fit_x = np.array([np.min(fit_data["log_I_fit"]), np.max(fit_data["log_I_fit"])])
+                                    fit_y = fit_data["slope"] * fit_x + fit_data["intercept"]
+                                    fig_tafel_comp.add_trace(go.Scatter(
+                                        x=fit_x, 
+                                        y=fit_y, 
+                                        mode='lines',
+                                        name=f"{trace_name} (Fit)",
+                                        line=dict(color=c_color, width=2, dash='dash'),
+                                        showlegend=False
+                                    ))
                         
         fig_comp.update_layout(
             xaxis_title="E (V vs Ref.)",
@@ -531,10 +574,21 @@ if uploaded_files:
         )
         st.plotly_chart(fig_comp, use_container_width=True)
         
+        # Renderizar gráfico de Tafel combinado si hay alguna curva LSV en el grupo
+        if is_group_lsv:
+            fig_tafel_comp.update_layout(
+                title="Tafel Plot Comparison (log₁₀|I| vs E)",
+                xaxis_title="log₁₀|I| (A)",
+                yaxis_title="E (V vs Ref.)",
+                legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99, bgcolor="rgba(0,0,0,0.5)"),
+                height=600
+            )
+            st.plotly_chart(fig_tafel_comp, use_container_width=True)
+        
         # --- TABLA DE ESTADÍSTICAS DEL GRUPO (SOLO LSV) ---
         if group_lsv_params:
             st.markdown("#### 🧪 Group Catalytic Statistics (LSV)")
-            st.info("ℹ️ **Heurística de Cálculo:** $E_{onset}$ se calcula dinámicamente al 10% de $|I_{max}|$. La Pendiente de Tafel se ajusta mediante regresión lineal en la ventana entre el 10% y el 50% de $|I_{max}|$.")
+            st.info("ℹ️ **Heurística de Cálculo:** $E_{onset}$ se calcula dinámicamente al 10% de $|I_{max}|$. La Pendiente de Tafel se ajusta mediante regresión lineal en la ventana entre el 10% y el 50% de $|I_{max}|$ (representado por las líneas punteadas).")
             
             df_cat = pd.DataFrame(group_lsv_params)
             summary = []
@@ -560,7 +614,7 @@ if uploaded_files:
             st.markdown("<br>", unsafe_allow_html=True)
 
 
-    # --- NUEVA ZONA: SUPER GROUPS ---
+    # --- ZONA: SUPER GROUPS ---
     st.markdown("---")
     st.header("🧬 Super Groups (Group of Groups)")
     st.markdown("Combine entire groups into a single plot. **Each group will be assigned a distinct base color** (e.g. Group 1 in Blues, Group 2 in Reds).")
@@ -714,8 +768,9 @@ if uploaded_files:
         c4.metric("Scan Rate", f"{sr} mV/s" if sr is not None else "N/A")
 
         fig = go.Figure()
+        fig_tafel = go.Figure() # Nuevo gráfico para el Tafel individual
         results_list = []
-        lsv_cat_list = [] # Nueva lista para parámetros catalíticos individuales
+        lsv_cat_list = [] 
         
         for i, (cid, dfi) in enumerate(curves):
             Ecol = "Vf" if "Vf" in dfi.columns else ("Vu" if "Vu" in dfi.columns else None)
@@ -749,12 +804,33 @@ if uploaded_files:
                 "Reduction Max (V)": round(ro[1], 4) if ro else None,
             })
             
-            # Extraer parámetros si es LSV individual
             if technique == "Linear Sweep Voltammetry (LSV)":
-                cat_params = extract_lsv_catalytic_parameters(dd)
+                cat_params, fit_data = extract_lsv_catalytic_parameters(dd)
                 if cat_params:
                     cat_params = {"Curve": cid, **cat_params}
                     lsv_cat_list.append(cat_params)
+                    
+                    # Trazar curva de Tafel individual
+                    fig_tafel.add_trace(go.Scatter(
+                        x=fit_data["log_I_full"], 
+                        y=fit_data["E_full"], 
+                        mode='lines',
+                        name=f"{cid} (Log Curve)", 
+                        line=dict(color=line_color, width=2)
+                    ))
+                    
+                    # Trazar línea de ajuste de Tafel
+                    if not np.isnan(fit_data["slope"]):
+                        fit_x = np.array([np.min(fit_data["log_I_fit"]), np.max(fit_data["log_I_fit"])])
+                        fit_y = fit_data["slope"] * fit_x + fit_data["intercept"]
+                        fig_tafel.add_trace(go.Scatter(
+                            x=fit_x, 
+                            y=fit_y, 
+                            mode='lines',
+                            name=f"{cid} (Fit)", 
+                            line=dict(color=line_color, width=2, dash='dash'),
+                            showlegend=False
+                        ))
 
         fig.update_layout(
             xaxis_title="E (V vs Ref.)",
@@ -764,12 +840,21 @@ if uploaded_files:
         
         st.plotly_chart(fig, use_container_width=True)
         
-        # Muestra la tabla de parámetros de voltaje
+        # Mostrar el gráfico de Tafel si es LSV
+        if technique == "Linear Sweep Voltammetry (LSV)" and lsv_cat_list:
+            fig_tafel.update_layout(
+                title="Tafel Plot (log₁₀|I| vs E)",
+                xaxis_title="log₁₀|I| (A)",
+                yaxis_title="E (V vs Ref.)",
+                legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99, bgcolor="rgba(0,0,0,0.5)"),
+                height=500
+            )
+            st.plotly_chart(fig_tafel, use_container_width=True)
+        
         if results_list:
             st.write("**Recommended Operating Ranges:**")
             st.dataframe(pd.DataFrame(results_list), use_container_width=True)
             
-        # Muestra la tabla catalítica si es LSV
         if lsv_cat_list:
             st.write("**🧪 Catalytic Parameters:**")
             st.dataframe(pd.DataFrame(lsv_cat_list), use_container_width=True)
