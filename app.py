@@ -225,7 +225,6 @@ def parse_biologic_mpt(raw: str):
     meta = {}
     header_lines = 0
 
-    # Detect header length
     for line in lines:
         if "Nb header lines" in line:
             try:
@@ -234,7 +233,6 @@ def parse_biologic_mpt(raw: str):
                 header_lines = 0
             break
 
-    # Metadata extraction (Handles both ":" and spaced formatting)
     for i in range(min(header_lines, len(lines))):
         line = lines[i].strip()
         if not line:
@@ -248,7 +246,6 @@ def parse_biologic_mpt(raw: str):
             if len(parts) >= 2:
                 meta[parts[0].strip()] = parts[1].strip()
 
-    # Data
     data_lines = [line for line in lines[header_lines:] if line.strip()]
 
     if not data_lines:
@@ -285,7 +282,6 @@ def parse_biologic_mpt(raw: str):
         elif len(parts) > 0:
             rows.append(parts + [np.nan] * (num_cols - len(parts)))
 
-    # Force unique columns
     unique_cols = []
     seen = set()
     for c in cols:
@@ -306,9 +302,6 @@ def parse_biologic_mpt(raw: str):
 
     df = df.replace([np.inf, -np.inf], np.nan).dropna(how="all").reset_index(drop=True)
 
-    # ========================================================
-    # DETECCIÓN DE COLUMNAS E IDENTIFICACIÓN DE CICLOS
-    # ========================================================
     col_map = {}
     for c in df.columns:
         cl = c.lower()
@@ -327,7 +320,6 @@ def parse_biologic_mpt(raw: str):
     if df["Im"].abs().max() > 1:
         df["Im"] = df["Im"] / 1000
 
-    # Dividir datos basado en número de ciclo
     curves = []
     if "Cycle" in df.columns:
         unique_cycles = sorted(df["Cycle"].dropna().unique())
@@ -361,6 +353,7 @@ def convert_df_to_excel(curves_list: List[Tuple[str, pd.DataFrame]]) -> bytes:
 # ============================================================
 uploaded_files = st.file_uploader("Upload CV/LSV files", type=["DTA", "dta", "mpt", "MPT"], accept_multiple_files=True)
 default_colors = px.colors.qualitative.Plotly
+combined_palette = px.colors.qualitative.Alphabet + px.colors.qualitative.Plotly # Paleta ampliada para plot combinado
 
 if uploaded_files:
     file_dict = {f.name: f for f in uploaded_files}
@@ -397,6 +390,14 @@ if uploaded_files:
 
     actual_file_order = [name.replace("⋮⋮ ", "") for name in sorted_display_names]
 
+    # --- TOP CONTAINER PARA EL GRÁFICO COMBINADO ---
+    top_container = st.container()
+    show_combined = top_container.toggle("📈 Generate Combined Plot (Compare All Uploaded Files)", value=False)
+    
+    combined_fig = go.Figure()
+    combined_trace_idx = 0
+
+    # Iteración sobre los archivos
     for file_name in actual_file_order:
         if file_name not in file_dict:
             continue 
@@ -410,7 +411,6 @@ if uploaded_files:
         if instrument.startswith("Gamry"):
             meta, curves = parse_gamry_dta_multi_curve(raw_text)
             
-            # Detectar LSV vs CV basándonos en TITLE o TAG explícitos
             tag = meta.get("TAG", "").upper()
             title = meta.get("TITLE", "").upper()
             
@@ -430,7 +430,6 @@ if uploaded_files:
         else:
             meta, curves = parse_biologic_mpt(raw_text)
             
-            # Detectar LSV vs CV en Biologic
             if "E2 (V)" in meta:
                 technique = "Cyclic Voltammetry (CV)"
                 vinit = _to_float(meta.get("Ei (V)"))
@@ -451,7 +450,6 @@ if uploaded_files:
         col_title, col_btn = st.columns([4, 1])
         with col_title:
             st.subheader(f"📄 Data for: {file.name}")
-            # Mostrar la técnica detectada
             st.markdown(f"🔬 **Technique Detected:** `{technique}`")
         with col_btn:
             excel_data = convert_df_to_excel(curves)
@@ -467,7 +465,6 @@ if uploaded_files:
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Initial Potential", f"{vinit} V" if vinit is not None else "N/A")
         
-        # Ajustamos los nombres de los límites si es LSV
         if technique == "Linear Sweep Voltammetry (LSV)":
             c2.metric("Final Potential", f"{vlim1} V" if vlim1 is not None else "N/A")
             c3.metric("Scan Limit 2", "N/A")
@@ -491,6 +488,7 @@ if uploaded_files:
             
             line_color = default_colors[i % len(default_colors)]
             
+            # Gráfico individual
             fig.add_trace(go.Scatter(
                 x=dd[Ecol], 
                 y=dd["Im"], 
@@ -498,6 +496,20 @@ if uploaded_files:
                 name=cid,
                 line=dict(color=line_color, width=2)
             ))
+
+            # Agregar al gráfico combinado si el toggle está encendido
+            if show_combined:
+                trace_name = f"{file.name}" if len(curves) == 1 else f"{file.name} ({cid})"
+                combined_line_color = combined_palette[combined_trace_idx % len(combined_palette)]
+                
+                combined_fig.add_trace(go.Scatter(
+                    x=dd[Ecol], 
+                    y=dd["Im"], 
+                    mode='lines',
+                    name=trace_name,
+                    line=dict(color=combined_line_color, width=2)
+                ))
+                combined_trace_idx += 1
             
             out = recommend_operating_ranges_for_curve(dfi)
             ns = out["recommended_noise_safe_V"]
@@ -533,3 +545,34 @@ if uploaded_files:
         if results_list:
             st.write("**Recommended Operating Ranges:**")
             st.dataframe(pd.DataFrame(results_list), use_container_width=True)
+
+    # --- RENDERIZAR GRÁFICO COMBINADO EN LA PARTE SUPERIOR ---
+    if show_combined and combined_trace_idx > 0:
+        with top_container:
+            st.info("💡 **Tip:** Puedes hacer doble clic sobre el nombre de un archivo en la leyenda para aislarlo, o un clic simple para ocultarlo/mostrarlo.")
+            
+            combined_fig.update_layout(
+                title="Master Comparison Plot",
+                xaxis_title="E (V vs Ref.)",
+                yaxis_title="I (A)",
+                height=700, # Gráfico un poco más grande para facilitar la comparación
+                legend=dict(
+                    yanchor="top", 
+                    y=0.99, 
+                    xanchor="right", 
+                    x=0.99, 
+                    bgcolor="rgba(0,0,0,0.5)" # Fondo semitransparente para que no bloquee totalmente las curvas
+                )
+            )
+            
+            plot_config_combined = {
+                'toImageButtonOptions': {
+                    'format': 'png', 
+                    'filename': "Master_Comparison_Plot", 
+                    'height': 800,
+                    'width': 1200,
+                    'scale': 4 
+                }
+            }
+            
+            st.plotly_chart(combined_fig, use_container_width=True, config=plot_config_combined)
