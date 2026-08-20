@@ -130,7 +130,6 @@ def recommend_operating_ranges_for_curve(df_curve, baseline_E_window=0.20, smoot
 # CATALYTIC PARAMETERS & TAFEL FIT
 # ============================================================
 def extract_lsv_catalytic_parameters(df_curve: pd.DataFrame) -> Tuple[dict, dict]:
-    """Extrae parámetros catalíticos y devuelve datos para graficar la curva de Tafel y su ajuste lineal."""
     Ecol = "Vf" if "Vf" in df_curve.columns else ("Vu" if "Vu" in df_curve.columns else None)
     if Ecol is None or "Im" not in df_curve.columns:
         return {}, {}
@@ -144,11 +143,9 @@ def extract_lsv_catalytic_parameters(df_curve: pd.DataFrame) -> Tuple[dict, dict
         
     I_max = np.max(abs_I)
     
-    # Onset: 10% de la corriente máxima
     onset_mask = abs_I >= 0.10 * I_max
     E_onset = E[onset_mask][0] if np.any(onset_mask) else np.nan
     
-    # Zona de Tafel: entre 10% y 50% de la corriente máxima
     tafel_mask = (abs_I >= 0.10 * I_max) & (abs_I <= 0.50 * I_max)
     E_tafel = E[tafel_mask]
     I_tafel = abs_I[tafel_mask]
@@ -161,9 +158,8 @@ def extract_lsv_catalytic_parameters(df_curve: pd.DataFrame) -> Tuple[dict, dict
     if len(E_tafel) > 5:
         log_I_tafel = np.log10(I_tafel)
         try:
-            # Regresión Lineal: E = slope * log10(|I|) + intercept
             slope, intercept = np.polyfit(log_I_tafel, E_tafel, 1)
-            tafel_slope = abs(slope * 1000) # mV/dec
+            tafel_slope = abs(slope * 1000) 
         except Exception:
             pass
             
@@ -173,7 +169,6 @@ def extract_lsv_catalytic_parameters(df_curve: pd.DataFrame) -> Tuple[dict, dict
         "Tafel Slope (mV/dec)": tafel_slope
     }
     
-    # Calcular el logaritmo solo para corrientes mayores a 0 para el gráfico completo
     valid_I = abs_I > 0
     log_I_full = np.full_like(abs_I, np.nan, dtype=float)
     log_I_full[valid_I] = np.log10(abs_I[valid_I])
@@ -495,7 +490,7 @@ if uploaded_files:
         st.subheader(f"{group['header']}")
         
         fig_comp = go.Figure()
-        fig_tafel_comp = go.Figure() # Nuevo gráfico para el Tafel del grupo
+        fig_tafel_comp = go.Figure()
         trace_idx = 0
         group_lsv_params = [] 
         is_group_lsv = False
@@ -544,7 +539,6 @@ if uploaded_files:
                                 cat_params = {"File": fname, "Curve": cid, **cat_params} 
                                 group_lsv_params.append(cat_params)
                                 
-                                # Trazar la curva en escala logarítmica
                                 fig_tafel_comp.add_trace(go.Scatter(
                                     x=fit_data["log_I_full"],
                                     y=fit_data["E_full"],
@@ -553,17 +547,24 @@ if uploaded_files:
                                     line=dict(color=c_color, width=2)
                                 ))
                                 
-                                # Trazar la línea punteada del ajuste de Tafel
-                                if not np.isnan(fit_data["slope"]):
-                                    fit_x = np.array([np.min(fit_data["log_I_fit"]), np.max(fit_data["log_I_fit"])])
+                                # Trazar línea de ajuste extrapolada con valor en leyenda
+                                if not np.isnan(fit_data["slope"]) and len(fit_data["log_I_fit"]) > 0:
+                                    min_x = np.min(fit_data["log_I_fit"])
+                                    max_x = np.max(fit_data["log_I_fit"])
+                                    span = max_x - min_x
+                                    
+                                    # Extrapolar la línea un poco más allá de la zona de ajuste para visualizar la tangente
+                                    fit_x = np.array([min_x - (span*1.5), max_x + (span*1.5)])
                                     fit_y = fit_data["slope"] * fit_x + fit_data["intercept"]
+                                    
+                                    tafel_val = cat_params["Tafel Slope (mV/dec)"]
+                                    
                                     fig_tafel_comp.add_trace(go.Scatter(
                                         x=fit_x, 
                                         y=fit_y, 
                                         mode='lines',
-                                        name=f"{trace_name} (Fit)",
-                                        line=dict(color=c_color, width=2, dash='dash'),
-                                        showlegend=False
+                                        name=f"Fit: {tafel_val:.1f} mV/dec",
+                                        line=dict(color=c_color, width=2, dash='dot')
                                     ))
                         
         fig_comp.update_layout(
@@ -574,7 +575,6 @@ if uploaded_files:
         )
         st.plotly_chart(fig_comp, use_container_width=True)
         
-        # Renderizar gráfico de Tafel combinado si hay alguna curva LSV en el grupo
         if is_group_lsv:
             fig_tafel_comp.update_layout(
                 title="Tafel Plot Comparison (log₁₀|I| vs E)",
@@ -585,7 +585,6 @@ if uploaded_files:
             )
             st.plotly_chart(fig_tafel_comp, use_container_width=True)
         
-        # --- TABLA DE ESTADÍSTICAS DEL GRUPO (SOLO LSV) ---
         if group_lsv_params:
             st.markdown("#### 🧪 Group Catalytic Statistics (LSV)")
             st.info("ℹ️ **Heurística de Cálculo:** $E_{onset}$ se calcula dinámicamente al 10% de $|I_{max}|$. La Pendiente de Tafel se ajusta mediante regresión lineal en la ventana entre el 10% y el 50% de $|I_{max}|$ (representado por las líneas punteadas).")
@@ -768,7 +767,7 @@ if uploaded_files:
         c4.metric("Scan Rate", f"{sr} mV/s" if sr is not None else "N/A")
 
         fig = go.Figure()
-        fig_tafel = go.Figure() # Nuevo gráfico para el Tafel individual
+        fig_tafel = go.Figure()
         results_list = []
         lsv_cat_list = [] 
         
@@ -810,7 +809,6 @@ if uploaded_files:
                     cat_params = {"Curve": cid, **cat_params}
                     lsv_cat_list.append(cat_params)
                     
-                    # Trazar curva de Tafel individual
                     fig_tafel.add_trace(go.Scatter(
                         x=fit_data["log_I_full"], 
                         y=fit_data["E_full"], 
@@ -819,17 +817,23 @@ if uploaded_files:
                         line=dict(color=line_color, width=2)
                     ))
                     
-                    # Trazar línea de ajuste de Tafel
-                    if not np.isnan(fit_data["slope"]):
-                        fit_x = np.array([np.min(fit_data["log_I_fit"]), np.max(fit_data["log_I_fit"])])
+                    # Trazar línea de ajuste extrapolada
+                    if not np.isnan(fit_data["slope"]) and len(fit_data["log_I_fit"]) > 0:
+                        min_x = np.min(fit_data["log_I_fit"])
+                        max_x = np.max(fit_data["log_I_fit"])
+                        span = max_x - min_x
+                        
+                        fit_x = np.array([min_x - (span*1.5), max_x + (span*1.5)])
                         fit_y = fit_data["slope"] * fit_x + fit_data["intercept"]
+                        
+                        tafel_val = cat_params["Tafel Slope (mV/dec)"]
+                        
                         fig_tafel.add_trace(go.Scatter(
                             x=fit_x, 
                             y=fit_y, 
                             mode='lines',
-                            name=f"{cid} (Fit)", 
-                            line=dict(color=line_color, width=2, dash='dash'),
-                            showlegend=False
+                            name=f"{cid} Fit ({tafel_val:.1f} mV/dec)", 
+                            line=dict(color=line_color, width=2, dash='dot')
                         ))
 
         fig.update_layout(
@@ -840,7 +844,6 @@ if uploaded_files:
         
         st.plotly_chart(fig, use_container_width=True)
         
-        # Mostrar el gráfico de Tafel si es LSV
         if technique == "Linear Sweep Voltammetry (LSV)" and lsv_cat_list:
             fig_tafel.update_layout(
                 title="Tafel Plot (log₁₀|I| vs E)",
