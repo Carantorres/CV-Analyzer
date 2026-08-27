@@ -703,7 +703,7 @@ if uploaded_files:
             legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99, bgcolor="rgba(0,0,0,0.5)"),
             height=500
         )
-        st.plotly_chart(fig_comp, use_container_width=True)
+        st.plotly_chart(fig_comp)
         
         if is_group_lsv:
             c1, c2 = st.columns(2)
@@ -715,7 +715,7 @@ if uploaded_files:
                     legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99, bgcolor="rgba(0,0,0,0.5)"),
                     height=500
                 )
-                st.plotly_chart(fig_jeta_comp, use_container_width=True)
+                st.plotly_chart(fig_jeta_comp)
                 
             with c2:
                 fig_tafel_comp.update_layout(
@@ -726,7 +726,7 @@ if uploaded_files:
                     legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99, bgcolor="rgba(0,0,0,0.5)"),
                     height=500
                 )
-                st.plotly_chart(fig_tafel_comp, use_container_width=True)
+                st.plotly_chart(fig_tafel_comp)
         
         if group_lsv_params:
             st.markdown("#### 🧪 Group Catalytic Statistics (LSV)")
@@ -746,9 +746,9 @@ if uploaded_files:
                     
                     summary.append({
                         "Parameter": col,
-                        "Mean": round(mean_v, 6) if pd.notna(mean_v) else "N/A",
-                        "Std Dev (±)": round(std_v, 6) if pd.notna(std_v) else "N/A",
-                        "RSD (%)": round(rsd_v, 2) if pd.notna(rsd_v) else "N/A",
+                        "Mean": round(mean_v, 6) if pd.notna(mean_v) else None,
+                        "Std Dev (±)": round(std_v, 6) if pd.notna(std_v) else None,
+                        "RSD (%)": round(rsd_v, 2) if pd.notna(rsd_v) else None,
                         "Count (n)": int(n_v)
                     })
             
@@ -802,12 +802,12 @@ if uploaded_files:
                         
                         tech_sg = "Unknown"
                         if instrument.startswith("Gamry"):
-                            _, curves_comp = parse_gamry_dta_multi_curve(raw_text)
-                            if "LSV" in meta.get("TAG", "").upper() or "LINEAR" in meta.get("TITLE", "").upper():
+                            meta_sg, curves_comp = parse_gamry_dta_multi_curve(raw_text)
+                            if "LSV" in meta_sg.get("TAG", "").upper() or "LINEAR" in meta_sg.get("TITLE", "").upper():
                                 tech_sg = "LSV"
                         else:
-                            _, curves_comp = parse_biologic_mpt(raw_text)
-                            if not "E2 (V)" in meta:
+                            meta_sg, curves_comp = parse_biologic_mpt(raw_text)
+                            if not "E2 (V)" in meta_sg:
                                 tech_sg = "LSV"
                             
                         for cid, df_comp in curves_comp:
@@ -856,7 +856,7 @@ if uploaded_files:
                 
                 if is_sg_lsv:
                     c1, c2 = st.columns(2)
-                    with c1: st.plotly_chart(fig_super, use_container_width=True)
+                    with c1: st.plotly_chart(fig_super)
                     with c2:
                         fig_super_jeta.update_layout(
                             title=f"Combined j vs η: {', '.join(selected_groups)}",
@@ -865,9 +865,9 @@ if uploaded_files:
                             legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99, bgcolor="rgba(0,0,0,0.5)"),
                             height=600
                         )
-                        st.plotly_chart(fig_super_jeta, use_container_width=True)
+                        st.plotly_chart(fig_super_jeta)
                 else:
-                    st.plotly_chart(fig_super, use_container_width=True)
+                    st.plotly_chart(fig_super)
 
     # --- BOTTOM AREA: INDIVIDUAL ANALYSIS ---
     st.markdown("---")
@@ -1037,7 +1037,7 @@ if uploaded_files:
             legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01, bgcolor="rgba(0,0,0,0)"),
             height=500
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig)
         
         if technique == "Linear Sweep Voltammetry (LSV)" and lsv_cat_list:
             c1, c2 = st.columns(2)
@@ -1049,7 +1049,7 @@ if uploaded_files:
                     legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99, bgcolor="rgba(0,0,0,0.5)"),
                     height=500
                 )
-                st.plotly_chart(fig_jeta, use_container_width=True)
+                st.plotly_chart(fig_jeta)
                 
             with c2:
                 fig_tafel.update_layout(
@@ -1060,7 +1060,7 @@ if uploaded_files:
                     legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99, bgcolor="rgba(0,0,0,0.5)"),
                     height=500
                 )
-                st.plotly_chart(fig_tafel, use_container_width=True)
+                st.plotly_chart(fig_tafel)
         
         if results_list:
             st.write("**Recommended Operating Ranges:**")
