@@ -47,7 +47,6 @@ def _to_float(x):
         return None
 
 def extract_limits_from_data(df: pd.DataFrame, technique: str) -> Tuple[float, float, float]:
-    """Extrae vinit, vlim1 y vlim2 encontrando los vértices reales en la curva mediante inflexiones."""
     if len(df) == 0:
         return None, None, None
     
@@ -63,7 +62,6 @@ def extract_limits_from_data(df: pd.DataFrame, technique: str) -> Tuple[float, f
         vlim1 = round(float(v_data[-1]), 3)
         vlim2 = None
     else:
-        # Detectar cambios de dirección (vértices) para la CV
         dv = np.diff(v_data)
         dv_non_zero = dv[dv != 0]
         if len(dv_non_zero) == 0:
@@ -82,7 +80,6 @@ def extract_limits_from_data(df: pd.DataFrame, technique: str) -> Tuple[float, f
             else:
                 vlim2 = round(float(v_data[-1]), 3)
         else:
-            # Fallback si no hay cambio claro
             idx_max_dist = np.argmax(np.abs(v_data - v_data[0]))
             vlim1 = round(float(v_data[idx_max_dist]), 3)
             vlim2 = round(float(v_data[-1]), 3)
@@ -478,7 +475,6 @@ def parse_biologic_mpt(raw: str):
     return meta, curves
 
 def parse_pstrace_csv(raw: bytes) -> Tuple[Dict[str, str], List[Tuple[str, pd.DataFrame]]]:
-    """Parse PalmSens PSTrace exported CSV files."""
     text = None
     for enc in ['utf-8', 'utf-16', 'latin1']:
         try:
@@ -1055,7 +1051,6 @@ if uploaded_files:
                 technique = "Linear Sweep Voltammetry (LSV)"
             sr = _to_float(meta.get("dE/dt"))
 
-        # Override SR if user typed it
         if manual_scan_rate > 0.0:
             sr = manual_scan_rate
 
@@ -1063,7 +1058,7 @@ if uploaded_files:
             st.error(f"❌ Could not parse {file.name}. Check format.")
             continue
 
-        # Extract EXACT limits mathematically from the data of the first curve
+        # Mathematical limit detection on raw data
         vinit, vlim1, vlim2 = extract_limits_from_data(curves[0][1], technique)
 
         st.markdown(f"### {file.name}")
@@ -1085,7 +1080,7 @@ if uploaded_files:
         c1.metric("Initial Potential", f"{vinit} V" if vinit is not None else "N/A")
         
         if "LSV" in technique:
-            c2.metric("Scan Limit 1", f"{vlim1} V" if vlim1 is not None else "N/A")
+            c2.metric("Final Potential", f"{vlim1} V" if vlim1 is not None else "N/A")
             c3.metric("Scan Limit 2", "N/A")
         else:
             c2.metric("Scan Limit 1", f"{vlim1} V" if vlim1 is not None else "N/A")
@@ -1093,46 +1088,78 @@ if uploaded_files:
             
         c4.metric("Scan Rate", f"{sr} mV/s" if sr is not None else "N/A")
 
+        # Process curves upfront for standard plotting or averaging
+        processed_curves = []
+        for i, (cid, dfi) in enumerate(curves):
+            Ecol = "Vf" if "Vf" in dfi.columns else ("Vu" if "Vu" in dfi.columns else None)
+            if Ecol is None or "Im" not in dfi.columns:
+                continue
+                
+            dd = dfi[[Ecol, "Im"]].replace([np.inf, -np.inf], np.nan).dropna().copy()
+            
+            if apply_ir:
+                dd[Ecol] = dd[Ecol] - dd["Im"] * ru_ohms * (comp_percent / 100.0)
+            if convert_to_rhe:
+                dd[Ecol] = dd[Ecol] + e0_ref + (0.0591 * ph_val)
+                
+            if len(dd) < 10:
+                continue
+            processed_curves.append((cid, dd, Ecol))
+
+        if not processed_curves:
+            continue
+
         fig = go.Figure()
         fig_tafel = go.Figure()
         fig_jeta = go.Figure() 
         results_list = []
         lsv_cat_list = [] 
         max_log_I_ind = -10
-        
-        for i, (cid, dfi) in enumerate(curves):
-            Ecol = "Vf" if "Vf" in dfi.columns else ("Vu" if "Vu" in dfi.columns else None)
-            if Ecol is None or "Im" not in dfi.columns:
-                continue
+
+        # Feature: Average Scans Toggle
+        avg_cycles = False
+        if len(processed_curves) > 1:
+            avg_cycles = st.toggle(f"🌟 Average {len(processed_curves)} Cycles/Scans (Show Standard Deviation)", key=f"avg_{file.name}")
+
+        if avg_cycles:
+            # INTERPOLATION FOR AVERAGING
+            max_points = max(len(dd) for _, dd, _ in processed_curves)
+            common_idx = np.linspace(0, 1, max_points)
+            
+            E_interp = []
+            I_interp = []
+            
+            for _, dd, Ecol in processed_curves:
+                idx = np.linspace(0, 1, len(dd))
+                E_interp.append(np.interp(common_idx, idx, dd[Ecol].values))
+                I_interp.append(np.interp(common_idx, idx, dd["Im"].values))
                 
-            dd = dfi[[Ecol, "Im"]].replace([np.inf, -np.inf], np.nan).dropna()
+            E_mean = np.mean(E_interp, axis=0)
+            I_mean = np.mean(I_interp, axis=0)
+            I_std = np.std(I_interp, axis=0)
             
-            if apply_ir:
-                dd[Ecol] = dd[Ecol] - dd["Im"] * ru_ohms * (comp_percent / 100.0)
-            
-            if convert_to_rhe:
-                dd[Ecol] = dd[Ecol] + e0_ref + (0.0591 * ph_val)
-                
-            if len(dd) < 10:
-                continue
-            
-            line_color = default_colors[i % len(default_colors)]
+            mean_color = 'rgba(255, 75, 75, 1)' 
+            shade_color = 'rgba(255, 75, 75, 0.2)'
             
             fig.add_trace(go.Scatter(
-                x=dd[Ecol], 
-                y=dd["Im"], 
-                mode='lines',
-                name=cid,
-                line=dict(color=line_color, width=2)
+                x=E_mean, y=I_mean + I_std,
+                mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'
+            ))
+            fig.add_trace(go.Scatter(
+                x=E_mean, y=I_mean - I_std,
+                mode='lines', line=dict(width=0), fill='tonexty', fillcolor=shade_color, showlegend=False, hoverinfo='skip'
+            ))
+            fig.add_trace(go.Scatter(
+                x=E_mean, y=I_mean,
+                mode='lines', name='Average ± SD', line=dict(color=mean_color, width=2)
             ))
             
-            out = recommend_operating_ranges_for_curve(dfi)
-            ns = out["recommended_noise_safe_V"]
-            ro = out["recommended_reduction_only_V"]
+            df_mean = pd.DataFrame({"Vf": E_mean, "Im": I_mean})
             
+            out = recommend_operating_ranges_for_curve(df_mean)
+            ns, ro = out["recommended_noise_safe_V"], out["recommended_reduction_only_V"]
             results_list.append({
-                "Curve": cid,
-                "Points": out["N_points"],
+                "Curve": "Average Curve", "Points": out["N_points"],
                 "Noise-Safe Min (V)": round(ns[0], 4) if ns else None,
                 "Noise-Safe Max (V)": round(ns[1], 4) if ns else None,
                 "Reduction Min (V)": round(ro[0], 4) if ro else None,
@@ -1140,43 +1167,81 @@ if uploaded_files:
             })
             
             if "LSV" in technique:
-                cat_params, fit_data = extract_lsv_catalytic_parameters(dd, electrode_area, e_rev)
+                cat_params, fit_data = extract_lsv_catalytic_parameters(df_mean, electrode_area, e_rev)
                 if cat_params:
-                    cat_params = {"Curve": cid, **cat_params}
+                    cat_params = {"Curve": "Average Curve", **cat_params}
                     lsv_cat_list.append(cat_params)
                     max_log_I_ind = max(max_log_I_ind, fit_data["log_I_max"])
                     
                     fig_tafel.add_trace(go.Scatter(
-                        x=fit_data["log_I_full"], 
-                        y=fit_data["E_full"], 
-                        mode='lines',
-                        name=f"{cid} (Log Curve)", 
-                        line=dict(color=line_color, width=2)
+                        x=fit_data["log_I_full"], y=fit_data["E_full"],
+                        mode='lines', name="Average (Log Curve)", line=dict(color=mean_color, width=2)
                     ))
                     
                     if not np.isnan(fit_data["slope"]) and len(fit_data["log_I_fit"]) > 0:
-                        min_x = np.min(fit_data["log_I_fit"])
-                        max_x = np.max(fit_data["log_I_fit"])
+                        min_x, max_x = np.min(fit_data["log_I_fit"]), np.max(fit_data["log_I_fit"])
                         span = max_x - min_x
                         fit_x = np.array([min_x - (span*1.5), max_x + (span*1.5)])
                         fit_y = fit_data["slope"] * fit_x + fit_data["intercept"]
                         tafel_val = cat_params["Tafel Slope (mV/dec)"]
                         
                         fig_tafel.add_trace(go.Scatter(
-                            x=fit_x, 
-                            y=fit_y, 
-                            mode='lines',
-                            name=f"Fit: {tafel_val:.1f} mV/dec", 
-                            line=dict(color=line_color, width=2, dash='dot')
+                            x=fit_x, y=fit_y, mode='lines', name=f"Fit: {tafel_val:.1f} mV/dec", 
+                            line=dict(color=mean_color, width=2, dash='dot')
                         ))
                         
                     fig_jeta.add_trace(go.Scatter(
-                        x=fit_data["eta_mV"], 
-                        y=fit_data["j_dens"], 
-                        mode='lines',
-                        name=cid, 
-                        line=dict(color=line_color, width=2)
+                        x=fit_data["eta_mV"], y=fit_data["j_dens"], mode='lines',
+                        name="Average Curve", line=dict(color=mean_color, width=2)
                     ))
+                    
+        else:
+            # CLASSIC LOOP
+            for i, (cid, dd, Ecol) in enumerate(processed_curves):
+                line_color = default_colors[i % len(default_colors)]
+                
+                fig.add_trace(go.Scatter(
+                    x=dd[Ecol], y=dd["Im"], mode='lines', name=cid, line=dict(color=line_color, width=2)
+                ))
+                
+                out = recommend_operating_ranges_for_curve(dd)
+                ns, ro = out["recommended_noise_safe_V"], out["recommended_reduction_only_V"]
+                results_list.append({
+                    "Curve": cid, "Points": out["N_points"],
+                    "Noise-Safe Min (V)": round(ns[0], 4) if ns else None,
+                    "Noise-Safe Max (V)": round(ns[1], 4) if ns else None,
+                    "Reduction Min (V)": round(ro[0], 4) if ro else None,
+                    "Reduction Max (V)": round(ro[1], 4) if ro else None,
+                })
+                
+                if "LSV" in technique:
+                    cat_params, fit_data = extract_lsv_catalytic_parameters(dd, electrode_area, e_rev)
+                    if cat_params:
+                        cat_params = {"Curve": cid, **cat_params}
+                        lsv_cat_list.append(cat_params)
+                        max_log_I_ind = max(max_log_I_ind, fit_data["log_I_max"])
+                        
+                        fig_tafel.add_trace(go.Scatter(
+                            x=fit_data["log_I_full"], y=fit_data["E_full"],
+                            mode='lines', name=f"{cid} (Log Curve)", line=dict(color=line_color, width=2)
+                        ))
+                        
+                        if not np.isnan(fit_data["slope"]) and len(fit_data["log_I_fit"]) > 0:
+                            min_x, max_x = np.min(fit_data["log_I_fit"]), np.max(fit_data["log_I_fit"])
+                            span = max_x - min_x
+                            fit_x = np.array([min_x - (span*1.5), max_x + (span*1.5)])
+                            fit_y = fit_data["slope"] * fit_x + fit_data["intercept"]
+                            tafel_val = cat_params["Tafel Slope (mV/dec)"]
+                            
+                            fig_tafel.add_trace(go.Scatter(
+                                x=fit_x, y=fit_y, mode='lines', name=f"Fit: {tafel_val:.1f} mV/dec", 
+                                line=dict(color=line_color, width=2, dash='dot')
+                            ))
+                            
+                        fig_jeta.add_trace(go.Scatter(
+                            x=fit_data["eta_mV"], y=fit_data["j_dens"], mode='lines',
+                            name=cid, line=dict(color=line_color, width=2)
+                        ))
 
         fig.update_layout(
             title="Raw Data (E vs I)",
@@ -1210,6 +1275,10 @@ if uploaded_files:
                 )
                 st.plotly_chart(fig_tafel, use_container_width=True)
         
+        if results_list:
+            st.write("**Recommended Operating Ranges:**")
+            st.dataframe(pd.DataFrame(results_list), use_container_width=True)
+            
         if lsv_cat_list:
             st.write("**🧪 Catalytic Parameters:**")
             st.dataframe(pd.DataFrame(lsv_cat_list), use_container_width=True)
