@@ -481,13 +481,11 @@ def convert_df_to_excel(curves_list: List[Tuple[str, pd.DataFrame]]) -> bytes:
 # ============================================================
 uploaded_files = st.file_uploader("Upload CV/LSV files", type=["DTA", "dta", "mpt", "MPT", "csv", "CSV"], accept_multiple_files=True)
 
-# High contrast publication palette
 publication_palette = [
     '#000000', '#E41A1C', '#377EB8', '#4DAF4A', '#984EA3', '#FF7F00', '#A65628', '#F781BF', '#17BECF', '#BDB76B', '#000080'
 ] + px.colors.qualitative.Alphabet
 combined_palette = publication_palette
 
-# Plotly High-Res Export Config
 dl_config = {'toImageButtonOptions': {'format': 'png', 'filename': 'electrochem_plot', 'height': 720, 'width': 960, 'scale': 4}}
 
 with st.sidebar:
@@ -525,7 +523,6 @@ with st.sidebar:
     st.header("📄 Export Full Report")
     components.html("""<button onclick="window.parent.print();" style="background-color:#FF4B4B; color:white; border:none; border-radius:4px; padding:0.5rem 1rem; font-size:1rem; font-weight:600; cursor:pointer; width:100%;">🖨️ Save Page as PDF</button>""", height=50)
 
-# Y-Axis Labels adapted for Science styling
 i_axis_label = "Current, I (A)" if scientific_style else "I (A)"
 j_axis_label = "Current Density, j (mA cm⁻²)" if scientific_style else "Current Density j (mA/cm²)"
 
@@ -547,6 +544,21 @@ if uploaded_files:
         if c2.button("➖ Remove Group") and len(st.session_state.file_groups) > 1:
             st.session_state.file_groups[0]["items"].extend(st.session_state.file_groups[-1]["items"])
             st.session_state.file_groups.pop(); st.rerun()
+            
+        unassigned_count = len(st.session_state.file_groups[0]["items"])
+        if unassigned_count > 0 and len(st.session_state.file_groups) > 1:
+            st.markdown(f"**🚀 Bulk Move ({unassigned_count} files)**")
+            bc1, bc2 = st.columns([2, 1])
+            with bc1:
+                target_g = st.selectbox("Target", [g["header"] for g in st.session_state.file_groups[1:]], label_visibility="collapsed")
+            with bc2:
+                if st.button("Move All"):
+                    for g in st.session_state.file_groups:
+                        if g["header"] == target_g:
+                            g["items"].extend(st.session_state.file_groups[0]["items"])
+                            st.session_state.file_groups[0]["items"] = []
+                            st.rerun()
+                            
         st.session_state.file_groups = sort_items(st.session_state.file_groups, multi_containers=True)
 
     # --- TOP AREA: GROUPED COMPARISONS ---
