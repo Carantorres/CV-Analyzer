@@ -97,7 +97,7 @@ def extract_limits_from_data(df: pd.DataFrame, technique: str) -> Tuple[float, f
     return vinit, vlim1, vlim2
 
 def recommend_operating_ranges_for_curve(df_curve, baseline_E_window=0.20, smooth_window=151, smooth_poly=3, local_window=101, threshold_mode="percentile", nr_fixed=1.30, nr_percentile=95, min_run_points=60, I_tol=0.0):
-    Ecol = "Vf" if "Vf" in df_curve.columns else ("Vu" if "Vu" in df_curve.columns None)
+    Ecol = "Vf" if "Vf" in df_curve.columns else ("Vu" if "Vu" in df_curve.columns else None)
     df = df_curve[[Ecol, "Im"]].copy()
     df.columns = ["E", "I"]
     df = df.replace([np.inf, -np.inf], np.nan).dropna().reset_index(drop=True)
