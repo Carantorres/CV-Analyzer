@@ -46,6 +46,49 @@ def _to_float(x):
     except Exception:
         return None
 
+def extract_limits_from_data(df: pd.DataFrame, technique: str) -> Tuple[float, float, float]:
+    """Extrae vinit, vlim1 y vlim2 encontrando los vértices reales en la curva mediante inflexiones."""
+    if len(df) == 0:
+        return None, None, None
+    
+    Ecol = "Vf" if "Vf" in df.columns else ("Vu" if "Vu" in df.columns else df.columns[0])
+    v_data = df[Ecol].dropna().values
+    
+    if len(v_data) == 0:
+        return None, None, None
+        
+    vinit = round(float(v_data[0]), 3)
+    
+    if "LSV" in technique:
+        vlim1 = round(float(v_data[-1]), 3)
+        vlim2 = None
+    else:
+        # Detectar cambios de dirección (vértices) para la CV
+        dv = np.diff(v_data)
+        dv_non_zero = dv[dv != 0]
+        if len(dv_non_zero) == 0:
+            return vinit, vinit, vinit
+            
+        signs = np.sign(dv_non_zero)
+        sign_changes = np.where(signs[:-1] != signs[1:])[0]
+        
+        non_zero_indices = np.where(dv != 0)[0]
+        turn_indices = non_zero_indices[sign_changes] + 1
+        
+        if len(turn_indices) >= 1:
+            vlim1 = round(float(v_data[turn_indices[0]]), 3)
+            if len(turn_indices) >= 2:
+                vlim2 = round(float(v_data[turn_indices[1]]), 3)
+            else:
+                vlim2 = round(float(v_data[-1]), 3)
+        else:
+            # Fallback si no hay cambio claro
+            idx_max_dist = np.argmax(np.abs(v_data - v_data[0]))
+            vlim1 = round(float(v_data[idx_max_dist]), 3)
+            vlim2 = round(float(v_data[-1]), 3)
+            
+    return vinit, vlim1, vlim2
+
 def recommend_operating_ranges_for_curve(df_curve, baseline_E_window=0.20, smooth_window=151, smooth_poly=3, local_window=101, threshold_mode="percentile", nr_fixed=1.30, nr_percentile=95, min_run_points=60, I_tol=0.0):
     Ecol = "Vf" if "Vf" in df_curve.columns else ("Vu" if "Vu" in df_curve.columns else None)
     df = df_curve[[Ecol, "Im"]].copy()
@@ -435,6 +478,7 @@ def parse_biologic_mpt(raw: str):
     return meta, curves
 
 def parse_pstrace_csv(raw: bytes) -> Tuple[Dict[str, str], List[Tuple[str, pd.DataFrame]]]:
+    """Parse PalmSens PSTrace exported CSV files."""
     text = None
     for enc in ['utf-8', 'utf-16', 'latin1']:
         try:
@@ -550,13 +594,10 @@ def convert_df_to_excel(curves_list: List[Tuple[str, pd.DataFrame]]) -> bytes:
                 continue
             clean_df = df.replace([np.inf, -np.inf], np.nan).dropna(subset=[Ecol, "Im"])
             if len(clean_df) >= 10:
-                # Sanitizar nombre de hoja para Excel (limite 31 chars, no caracteres invalidos)
                 safe_name = re.sub(r'[\\*?:/\[\]]', '_', cid)
                 safe_name = safe_name[:31].strip()
-                if not safe_name:
-                    safe_name = "Sheet"
+                if not safe_name: safe_name = "Sheet"
                 
-                # Asegurar nombres unicos por si al truncar quedaron identicos
                 original_safe_name = safe_name
                 counter = 1
                 while safe_name in seen_names:
@@ -590,7 +631,7 @@ with st.sidebar:
     apply_ir = st.toggle("Apply iR Compensation", value=False)
     if apply_ir:
         ru_ohms = st.number_input("Uncompensated Resistance (Ru) [Ohms]", value=10.0, step=1.0)
-        comp_percent = st.slider("Compensation Percentage (%)", min_value=0, max_value=100, value=85, step=1, help="Avoid 100% to prevent overcompensation noise.")
+        comp_percent = st.slider("Compensation Percentage (%)", min_value=0, max_value=100, value=85, step=1)
     else:
         ru_ohms = 0.0
         comp_percent = 0.0
@@ -616,13 +657,11 @@ with st.sidebar:
 
     st.markdown("---")
     st.header("⚙️ Catalytic Parameters")
-    st.markdown("Set these values to accurately calculate Current Density ($j$) and Overpotential ($\eta$).")
     
     electrode_area = st.number_input("Electrode Area (cm²)", min_value=0.00001, value=1.00000, step=0.001, format="%.5f")
+    manual_scan_rate = st.number_input("Manual Scan Rate (mV/s) [Optional]", value=0.0, step=10.0, help="Use this if your file format (like simple PSTrace CSV) does not include the scan rate. Set to 0.0 to auto-detect.")
     
-    if convert_to_rhe:
-        st.info("💡 **Tip:** Since you are converting to RHE, E_rev is generally **0.0 V** for HER and **1.23 V** for OER.")
-    e_rev = st.number_input("Thermodynamic Potential (E_rev)", value=0.000, step=0.01, help="Used to calculate Overpotential: η = |E - E_rev|")
+    e_rev = st.number_input("Thermodynamic Potential (E_rev)", value=0.000, step=0.01)
     
     st.markdown("---")
     st.header("📄 Export Full Report")
@@ -691,20 +730,6 @@ if uploaded_files:
                 st.rerun()
                 
         st.session_state.file_groups = sort_items(st.session_state.file_groups, multi_containers=True)
-        
-        st.markdown("---")
-        st.markdown(
-            """
-            <div style='text-align: center; margin-top: 50px;'>
-                <p style='color: #888888; font-size: 0.85rem; font-family: sans-serif;'>
-                    Developed by<br>
-                    <b>PhD(c) Carlos A. Torres-Ramírez</b><br><br>
-                    <i>Optimized for GAMRY 1010B & Biologic Formats</i>
-                </p>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
 
     # --- TOP AREA: GROUPED COMPARISONS ---
     has_groups_plotted = False
@@ -853,8 +878,6 @@ if uploaded_files:
         
         if group_lsv_params:
             st.markdown("#### 🧪 Group Catalytic Statistics (LSV)")
-            st.info(f"ℹ️ **Cálculo Robusto de Tafel:** Evaluado dinámicamente mediante regresión de ventana deslizante para localizar el máximo $R^2$. Evaluado con un área de **{electrode_area} cm²** y un **E_rev = {e_rev} V**.")
-            
             df_cat = pd.DataFrame(group_lsv_params)
             summary = []
             
@@ -876,16 +899,13 @@ if uploaded_files:
                     })
             
             st.dataframe(pd.DataFrame(summary), use_container_width=True)
-            with st.expander(f"View raw catalytic data for {group['header']}"):
-                st.dataframe(df_cat, use_container_width=True)
             st.markdown("<br>", unsafe_allow_html=True)
 
 
     # --- ZONA: SUPER GROUPS ---
     st.markdown("---")
     st.header("🧬 Super Groups (Group of Groups)")
-    st.markdown("Combine entire groups into a single plot. **Each group will be assigned a distinct base color** (e.g. Group 1 in Blues, Group 2 in Reds).")
-
+    
     if 'num_super_groups' not in st.session_state:
         st.session_state.num_super_groups = 0
 
@@ -1011,54 +1031,40 @@ if uploaded_files:
         
         technique = "Unknown Technique"
 
+        # Parsing and Metadata Extraction
         if instrument.startswith("Gamry"):
             meta, curves = parse_gamry_dta_multi_curve(raw_text)
             tag = meta.get("TAG", "").upper()
             title = meta.get("TITLE", "").upper()
             if "LSV" in tag or "LINEAR" in title:
                 technique = "Linear Sweep Voltammetry (LSV)"
-                vinit = _to_float(meta.get("VINIT"))
-                vlim1 = _to_float(meta.get("VFINAL"))
-                vlim2 = None
             else:
                 technique = "Cyclic Voltammetry (CV)"
-                vinit = _to_float(meta.get("VINIT"))
-                vlim1 = _to_float(meta.get("VLIMIT1"))
-                vlim2 = _to_float(meta.get("VLIMIT2"))
             sr = _to_float(meta.get("SCANRATE"))
             
         elif instrument.startswith("PalmSens"):
             meta, curves = parse_pstrace_csv(file.getvalue())
             technique = meta.get("TECHNIQUE", "Unknown Technique")
-            if curves and len(curves[0][1]) > 0:
-                vinit = round(float(curves[0][1]["Vf"].iloc[0]), 3)
-                if "LSV" in technique:
-                    vlim1 = round(float(curves[0][1]["Vf"].iloc[-1]), 3)
-                    vlim2 = None
-                else:
-                    vlim1 = round(float(curves[0][1]["Vf"].max()), 3)
-                    vlim2 = round(float(curves[0][1]["Vf"].min()), 3)
-            else:
-                vinit, vlim1, vlim2 = None, None, None
             sr = None
             
         else:
             meta, curves = parse_biologic_mpt(raw_text)
             if "E2 (V)" in meta:
                 technique = "Cyclic Voltammetry (CV)"
-                vinit = _to_float(meta.get("Ei (V)"))
-                vlim1 = _to_float(meta.get("E1 (V)"))
-                vlim2 = _to_float(meta.get("E2 (V)"))
             else:
                 technique = "Linear Sweep Voltammetry (LSV)"
-                vinit = _to_float(meta.get("Ei (V)"))
-                vlim1 = _to_float(meta.get("E1 (V)")) or _to_float(meta.get("Ef (V)"))
-                vlim2 = None
             sr = _to_float(meta.get("dE/dt"))
+
+        # Override SR if user typed it
+        if manual_scan_rate > 0.0:
+            sr = manual_scan_rate
 
         if not curves:
             st.error(f"❌ Could not parse {file.name}. Check format.")
             continue
+
+        # Extract EXACT limits mathematically from the data of the first curve
+        vinit, vlim1, vlim2 = extract_limits_from_data(curves[0][1], technique)
 
         st.markdown(f"### {file.name}")
         col_title, col_btn = st.columns([4, 1])
@@ -1078,8 +1084,8 @@ if uploaded_files:
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Initial Potential", f"{vinit} V" if vinit is not None else "N/A")
         
-        if technique == "Linear Sweep Voltammetry (LSV)":
-            c2.metric("Final Potential", f"{vlim1} V" if vlim1 is not None else "N/A")
+        if "LSV" in technique:
+            c2.metric("Scan Limit 1", f"{vlim1} V" if vlim1 is not None else "N/A")
             c3.metric("Scan Limit 2", "N/A")
         else:
             c2.metric("Scan Limit 1", f"{vlim1} V" if vlim1 is not None else "N/A")
@@ -1133,7 +1139,7 @@ if uploaded_files:
                 "Reduction Max (V)": round(ro[1], 4) if ro else None,
             })
             
-            if technique == "Linear Sweep Voltammetry (LSV)":
+            if "LSV" in technique:
                 cat_params, fit_data = extract_lsv_catalytic_parameters(dd, electrode_area, e_rev)
                 if cat_params:
                     cat_params = {"Curve": cid, **cat_params}
@@ -1181,7 +1187,7 @@ if uploaded_files:
         )
         st.plotly_chart(fig, use_container_width=True)
         
-        if technique == "Linear Sweep Voltammetry (LSV)" and lsv_cat_list:
+        if "LSV" in technique and lsv_cat_list:
             c1, c2 = st.columns(2)
             with c1:
                 fig_jeta.update_layout(
@@ -1204,10 +1210,6 @@ if uploaded_files:
                 )
                 st.plotly_chart(fig_tafel, use_container_width=True)
         
-        if results_list:
-            st.write("**Recommended Operating Ranges:**")
-            st.dataframe(pd.DataFrame(results_list), use_container_width=True)
-            
         if lsv_cat_list:
             st.write("**🧪 Catalytic Parameters:**")
             st.dataframe(pd.DataFrame(lsv_cat_list), use_container_width=True)
