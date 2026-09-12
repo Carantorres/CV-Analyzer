@@ -232,14 +232,14 @@ def extract_lsv_catalytic_parameters(df_curve: pd.DataFrame, area_cm2: float, e_
     }
     return params, fit_data
 
-def apply_scientific_style(fig, is_scientific):
+def apply_scientific_style(fig, is_scientific, lx, ly, lxa, lya):
+    """Aplica el estilo editorial y posiciona la leyenda de forma personalizada."""
     if is_scientific:
         fig.update_layout(
             title=None, 
             plot_bgcolor='white',
             paper_bgcolor='white',
             font=dict(family="Arial, sans-serif", size=16, color="black"),
-            legend=dict(bgcolor='rgba(255, 255, 255, 0.9)', bordercolor='black', borderwidth=1, font=dict(size=14, color="black")),
             margin=dict(l=80, r=40, t=40, b=60)
         )
         fig.update_xaxes(
@@ -254,6 +254,17 @@ def apply_scientific_style(fig, is_scientific):
             title_font=dict(size=18, family="Arial, sans-serif", color="black"),
             tickfont=dict(size=15, family="Arial, sans-serif", color="black"), zeroline=False
         )
+        
+    # Aplicar la leyenda de forma universal
+    fig.update_layout(
+        legend=dict(
+            x=lx, y=ly, xanchor=lxa, yanchor=lya,
+            bgcolor='rgba(255, 255, 255, 0.9)', 
+            bordercolor='black', 
+            borderwidth=1 if is_scientific else 0,
+            font=dict(size=14, color="black" if is_scientific else None)
+        )
+    )
     return fig
 
 # ============================================================
@@ -491,8 +502,28 @@ dl_config = {'toImageButtonOptions': {'format': 'png', 'filename': 'electrochem_
 with st.sidebar:
     st.header("🎨 Plot Formatting")
     st.markdown("Customize plots for publication.")
-    scientific_style = st.toggle("Scientific Paper Style (ACS/Elsevier)", value=True, help="Applies a clean white background, black borders, inward ticks, and Arial font.")
-    show_sd_shadow = st.toggle("Show SD Shadow on Averages", value=True, help="Displays standard deviation as a shaded area behind averaged curves.")
+    scientific_style = st.toggle("Scientific Paper Style (ACS/Elsevier)", value=True)
+    show_sd_shadow = st.toggle("Show SD Shadow on Averages", value=True)
+    
+    st.markdown("---")
+    st.markdown("📦 **Legend Position Tool**")
+    leg_pos = st.selectbox("Quick Positions", ["Top-Right", "Top-Left", "Bottom-Right", "Bottom-Left", "Outside Right", "Custom..."])
+    
+    # Logic for legend positioning
+    if leg_pos == "Top-Right":
+        lx, ly, lxa, lya = 0.99, 0.99, "right", "top"
+    elif leg_pos == "Top-Left":
+        lx, ly, lxa, lya = 0.01, 0.99, "left", "top"
+    elif leg_pos == "Bottom-Right":
+        lx, ly, lxa, lya = 0.99, 0.01, "right", "bottom"
+    elif leg_pos == "Bottom-Left":
+        lx, ly, lxa, lya = 0.01, 0.01, "left", "bottom"
+    elif leg_pos == "Outside Right":
+        lx, ly, lxa, lya = 1.02, 1.0, "left", "top"
+    else:
+        lx = st.slider("X Coordinate", min_value=-0.2, max_value=1.5, value=0.99, step=0.01)
+        ly = st.slider("Y Coordinate", min_value=-0.2, max_value=1.5, value=0.99, step=0.01)
+        lxa, lya = "auto", "auto"
 
     st.markdown("---")
     st.header("⚡ iR Drop Compensation")
@@ -563,13 +594,10 @@ if uploaded_files:
 
     # --- TOP AREA: GROUPED COMPARISONS ---
     has_groups_plotted = False
-    valid_groups_for_super = []
     
     for g_idx, group in enumerate(st.session_state.file_groups):
         if g_idx == 0 or not group["items"]: continue 
         
-        valid_groups_for_super.append(group["header"])
-            
         if not has_groups_plotted:
             st.header("📈 Group Comparisons")
             has_groups_plotted = True
@@ -682,19 +710,19 @@ if uploaded_files:
                             fig_jeta_comp.add_trace(go.Scatter(x=fit_data["eta_mV"], y=fit_data["j_dens"], mode='lines', name=trace_name, line=dict(color=c_color, width=2)))
                     trace_idx += 1
                         
-        fig_comp.update_layout(title="Raw Data" if not scientific_style else None, xaxis_title=x_axis_label, yaxis_title=i_axis_label, legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99), height=500)
-        fig_comp = apply_scientific_style(fig_comp, scientific_style)
+        fig_comp.update_layout(title="Raw Data" if not scientific_style else None, xaxis_title=x_axis_label, yaxis_title=i_axis_label, height=500)
+        fig_comp = apply_scientific_style(fig_comp, scientific_style, lx, ly, lxa, lya)
         st.plotly_chart(fig_comp, use_container_width=True, config=dl_config)
         
         if is_group_lsv:
             c1, c2 = st.columns(2)
             with c1:
-                fig_jeta_comp.update_layout(title="Catalytic Performance" if not scientific_style else None, xaxis_title="Overpotential η (mV)", yaxis_title=j_axis_label, legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99), height=500)
-                fig_jeta_comp = apply_scientific_style(fig_jeta_comp, scientific_style)
+                fig_jeta_comp.update_layout(title="Catalytic Performance" if not scientific_style else None, xaxis_title="Overpotential η (mV)", yaxis_title=j_axis_label, height=500)
+                fig_jeta_comp = apply_scientific_style(fig_jeta_comp, scientific_style, lx, ly, lxa, lya)
                 st.plotly_chart(fig_jeta_comp, use_container_width=True, config=dl_config)
             with c2:
-                fig_tafel_comp.update_layout(title="Tafel Plot" if not scientific_style else None, xaxis_title="log₁₀|I| (A)", yaxis_title=x_axis_label, xaxis=dict(range=[max_log_I_global - 4.5, max_log_I_global + 0.2]), legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99), height=500)
-                fig_tafel_comp = apply_scientific_style(fig_tafel_comp, scientific_style)
+                fig_tafel_comp.update_layout(title="Tafel Plot" if not scientific_style else None, xaxis_title="log₁₀|I| (A)", yaxis_title=x_axis_label, xaxis=dict(range=[max_log_I_global - 4.5, max_log_I_global + 0.2]), height=500)
+                fig_tafel_comp = apply_scientific_style(fig_tafel_comp, scientific_style, lx, ly, lxa, lya)
                 st.plotly_chart(fig_tafel_comp, use_container_width=True, config=dl_config)
         
         if group_lsv_params:
@@ -827,19 +855,19 @@ if uploaded_files:
                             fig_tafel.add_trace(go.Scatter(x=fit_x, y=fit_data["slope"]*fit_x + fit_data["intercept"], mode='lines', name=f"Fit: {cat_params['Tafel Slope (mV/dec)']:.1f} mV/dec", line=dict(color=line_color, width=2, dash='dot')))
                         fig_jeta.add_trace(go.Scatter(x=fit_data["eta_mV"], y=fit_data["j_dens"], mode='lines', name=cid, line=dict(color=line_color, width=2)))
 
-        fig.update_layout(title="Raw Data" if not scientific_style else None, xaxis_title=x_axis_label, yaxis_title=i_axis_label, legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01), height=500)
-        fig = apply_scientific_style(fig, scientific_style)
+        fig.update_layout(title="Raw Data" if not scientific_style else None, xaxis_title=x_axis_label, yaxis_title=i_axis_label, height=500)
+        fig = apply_scientific_style(fig, scientific_style, lx, ly, lxa, lya)
         st.plotly_chart(fig, use_container_width=True, config=dl_config)
         
         if "LSV" in technique and lsv_cat_list:
             c1, c2 = st.columns(2)
             with c1:
-                fig_jeta.update_layout(title="Catalytic Performance" if not scientific_style else None, xaxis_title="Overpotential η (mV)", yaxis_title=j_axis_label, legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99), height=500)
-                fig_jeta = apply_scientific_style(fig_jeta, scientific_style)
+                fig_jeta.update_layout(title="Catalytic Performance" if not scientific_style else None, xaxis_title="Overpotential η (mV)", yaxis_title=j_axis_label, height=500)
+                fig_jeta = apply_scientific_style(fig_jeta, scientific_style, lx, ly, lxa, lya)
                 st.plotly_chart(fig_jeta, use_container_width=True, config=dl_config)
             with c2:
-                fig_tafel.update_layout(title="Tafel Plot" if not scientific_style else None, xaxis_title="log₁₀|I| (A)", yaxis_title=x_axis_label, xaxis=dict(range=[max_log_I_ind - 4.5, max_log_I_ind + 0.2]), legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99), height=500)
-                fig_tafel = apply_scientific_style(fig_tafel, scientific_style)
+                fig_tafel.update_layout(title="Tafel Plot" if not scientific_style else None, xaxis_title="log₁₀|I| (A)", yaxis_title=x_axis_label, xaxis=dict(range=[max_log_I_ind - 4.5, max_log_I_ind + 0.2]), height=500)
+                fig_tafel = apply_scientific_style(fig_tafel, scientific_style, lx, ly, lxa, lya)
                 st.plotly_chart(fig_tafel, use_container_width=True, config=dl_config)
         
         if results_list: st.write("**Recommended Operating Ranges:**"); st.dataframe(pd.DataFrame(results_list), use_container_width=True)
