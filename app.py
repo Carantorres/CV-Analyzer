@@ -16,15 +16,15 @@ from streamlit_sortables import sort_items
 # PAGE CONFIGURATION
 # ============================================================
 st.set_page_config(page_title="CV Analyzer", layout="wide")
-st.title("📊 Gamry & Biologic CV Analyzer")
-st.markdown("Upload your **Gamry (.DTA)** or **Biologic (.mpt)** files to visualize potential sweeps and extract catalytic parameters.")
+st.title("📊 Universal CV & LSV Analyzer")
+st.markdown("Upload your **Gamry (.DTA)**, **Biologic (.mpt)**, or **PSTrace (.csv)** files to visualize potential sweeps and extract catalytic parameters.")
 
 # ============================================================
 # INSTRUMENT SELECTION
 # ============================================================
 instrument = st.selectbox(
     "Select instrument format:",
-    ["Gamry 1010B (.DTA)", "Biologic SP-50e (.mpt)"]
+    ["Gamry 1010B (.DTA)", "Biologic SP-50e (.mpt)", "PalmSens PSTrace (.csv)"]
 )
 
 # ============================================================
@@ -434,6 +434,116 @@ def parse_biologic_mpt(raw: str):
 
     return meta, curves
 
+def parse_pstrace_csv(raw: bytes) -> Tuple[Dict[str, str], List[Tuple[str, pd.DataFrame]]]:
+    """Parse PalmSens PSTrace exported CSV files."""
+    text = None
+    for enc in ['utf-8', 'utf-16', 'latin1']:
+        try:
+            text = raw.decode(enc)
+            break
+        except Exception:
+            continue
+            
+    if not text:
+        return {}, []
+        
+    lines = text.splitlines()
+    meta = {}
+    curves = []
+    
+    scan_names = []
+    unit_row_idx = -1
+    
+    # Simple meta extraction for technique
+    for line in lines[:20]:
+        if "Linear Sweep" in line or "LSV" in line:
+            meta["TECHNIQUE"] = "Linear Sweep Voltammetry (LSV)"
+        elif "Cyclic Voltammetry" in line or "CV" in line:
+            meta["TECHNIQUE"] = "Cyclic Voltammetry (CV)"
+    
+    # Find unit row and scan names
+    for i, line in enumerate(lines[:50]):
+        if ("Scan" in line or "Curve" in line or "vs E" in line) and "Date" not in line and "Voltammetry" in line:
+            parts = [p.strip() for p in line.split(",") if p.strip()]
+            if len(parts) > 1 or (len(parts)==1 and "Scan" in parts[0]):
+                if not scan_names: 
+                    scan_names = parts
+        
+        parts = [p.strip() for p in line.split(",") if p.strip()]
+        if len(parts) >= 2 and any(v in parts[0] for v in ['V', 'mV', 'E']) and any('A' in u for u in parts):
+            unit_row_idx = i
+            break
+            
+    if unit_row_idx == -1:
+        return meta, curves
+        
+    unit_parts = [p.strip() for p in lines[unit_row_idx].split(",")]
+    
+    # Read the data block
+    data_lines = lines[unit_row_idx+1:]
+    rows = []
+    for line in data_lines:
+        if not line.strip(): continue
+        row = [p.strip() for p in line.split(",")]
+        rows.append(row)
+        
+    if not rows:
+        return meta, curves
+        
+    df_raw = pd.DataFrame(rows)
+    df_raw = df_raw.replace("", np.nan)
+    
+    num_cols = len(unit_parts)
+    num_scans = num_cols // 2
+    
+    if not scan_names:
+        scan_names = [f"Scan {i+1}" for i in range(num_scans)]
+        
+    for i in range(num_scans):
+        col_v = i * 2
+        col_i = i * 2 + 1
+        
+        if col_i >= df_raw.shape[1]:
+            break
+            
+        df_scan = df_raw.iloc[:, [col_v, col_i]].copy()
+        df_scan.columns = ["Vf", "Im"]
+        
+        # Convert to numeric safely
+        df_scan["Vf"] = pd.to_numeric(df_scan["Vf"].astype(str).str.replace(",", "."), errors="coerce")
+        df_scan["Im"] = pd.to_numeric(df_scan["Im"].astype(str).str.replace(",", "."), errors="coerce")
+        df_scan = df_scan.dropna()
+        
+        if len(df_scan) == 0:
+            continue
+            
+        # Unit conversion for Voltage
+        v_unit = unit_parts[col_v]
+        if "mV" in v_unit:
+            df_scan["Vf"] = df_scan["Vf"] / 1000.0
+            
+        # Unit conversion for Current (Standardize to Amperes)
+        i_unit = unit_parts[col_i]
+        if "mA" in i_unit:
+            df_scan["Im"] = df_scan["Im"] * 1e-3
+        elif "µA" in i_unit or "uA" in i_unit:
+            df_scan["Im"] = df_scan["Im"] * 1e-6
+        elif "nA" in i_unit:
+            df_scan["Im"] = df_scan["Im"] * 1e-9
+            
+        name = scan_names[i] if i < len(scan_names) else f"Scan {i+1}"
+        
+        if "TECHNIQUE" not in meta:
+            if "Linear Sweep" in name or "LSV" in name:
+                meta["TECHNIQUE"] = "Linear Sweep Voltammetry (LSV)"
+            elif "Cyclic Voltammetry" in name or "CV" in name:
+                meta["TECHNIQUE"] = "Cyclic Voltammetry (CV)"
+                
+        curves.append((name, df_scan))
+        
+    return meta, curves
+
+
 # ============================================================
 # EXPORT
 # ============================================================
@@ -452,7 +562,7 @@ def convert_df_to_excel(curves_list: List[Tuple[str, pd.DataFrame]]) -> bytes:
 # ============================================================
 # APP LOGIC
 # ============================================================
-uploaded_files = st.file_uploader("Upload CV/LSV files", type=["DTA", "dta", "mpt", "MPT"], accept_multiple_files=True)
+uploaded_files = st.file_uploader("Upload CV/LSV files", type=["DTA", "dta", "mpt", "MPT", "csv", "CSV"], accept_multiple_files=True)
 default_colors = px.colors.qualitative.Plotly
 combined_palette = px.colors.qualitative.Alphabet + px.colors.qualitative.Plotly 
 
@@ -627,9 +737,13 @@ if uploaded_files:
                 title_g = meta_g.get("TITLE", "").upper()
                 if "LSV" in tag_g or "LINEAR" in title_g:
                     technique_group = "LSV"
+            elif instrument.startswith("PalmSens"):
+                meta_p, curves_comp = parse_pstrace_csv(file.getvalue())
+                if "LSV" in meta_p.get("TECHNIQUE", ""):
+                    technique_group = "LSV"
             else:
-                meta_g, curves_comp = parse_biologic_mpt(raw_text)
-                if not "E2 (V)" in meta_g:
+                meta_b, curves_comp = parse_biologic_mpt(raw_text)
+                if not "E2 (V)" in meta_b:
                     technique_group = "LSV"
                 
             for cid, df_comp in curves_comp:
@@ -703,7 +817,7 @@ if uploaded_files:
             legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99, bgcolor="rgba(0,0,0,0.5)"),
             height=500
         )
-        st.plotly_chart(fig_comp)
+        st.plotly_chart(fig_comp, use_container_width=True)
         
         if is_group_lsv:
             c1, c2 = st.columns(2)
@@ -715,7 +829,7 @@ if uploaded_files:
                     legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99, bgcolor="rgba(0,0,0,0.5)"),
                     height=500
                 )
-                st.plotly_chart(fig_jeta_comp)
+                st.plotly_chart(fig_jeta_comp, use_container_width=True)
                 
             with c2:
                 fig_tafel_comp.update_layout(
@@ -726,7 +840,7 @@ if uploaded_files:
                     legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99, bgcolor="rgba(0,0,0,0.5)"),
                     height=500
                 )
-                st.plotly_chart(fig_tafel_comp)
+                st.plotly_chart(fig_tafel_comp, use_container_width=True)
         
         if group_lsv_params:
             st.markdown("#### 🧪 Group Catalytic Statistics (LSV)")
@@ -805,6 +919,10 @@ if uploaded_files:
                             meta_sg, curves_comp = parse_gamry_dta_multi_curve(raw_text)
                             if "LSV" in meta_sg.get("TAG", "").upper() or "LINEAR" in meta_sg.get("TITLE", "").upper():
                                 tech_sg = "LSV"
+                        elif instrument.startswith("PalmSens"):
+                            meta_sg, curves_comp = parse_pstrace_csv(file.getvalue())
+                            if "LSV" in meta_sg.get("TECHNIQUE", ""):
+                                tech_sg = "LSV"
                         else:
                             meta_sg, curves_comp = parse_biologic_mpt(raw_text)
                             if not "E2 (V)" in meta_sg:
@@ -856,7 +974,7 @@ if uploaded_files:
                 
                 if is_sg_lsv:
                     c1, c2 = st.columns(2)
-                    with c1: st.plotly_chart(fig_super)
+                    with c1: st.plotly_chart(fig_super, use_container_width=True)
                     with c2:
                         fig_super_jeta.update_layout(
                             title=f"Combined j vs η: {', '.join(selected_groups)}",
@@ -865,9 +983,9 @@ if uploaded_files:
                             legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99, bgcolor="rgba(0,0,0,0.5)"),
                             height=600
                         )
-                        st.plotly_chart(fig_super_jeta)
+                        st.plotly_chart(fig_super_jeta, use_container_width=True)
                 else:
-                    st.plotly_chart(fig_super)
+                    st.plotly_chart(fig_super, use_container_width=True)
 
     # --- BOTTOM AREA: INDIVIDUAL ANALYSIS ---
     st.markdown("---")
@@ -899,6 +1017,21 @@ if uploaded_files:
                 vlim1 = _to_float(meta.get("VLIMIT1"))
                 vlim2 = _to_float(meta.get("VLIMIT2"))
             sr = _to_float(meta.get("SCANRATE"))
+            
+        elif instrument.startswith("PalmSens"):
+            meta, curves = parse_pstrace_csv(file.getvalue())
+            technique = meta.get("TECHNIQUE", "Unknown Technique")
+            if curves and len(curves[0][1]) > 0:
+                vinit = round(float(curves[0][1]["Vf"].iloc[0]), 3)
+                if "LSV" in technique:
+                    vlim1 = round(float(curves[0][1]["Vf"].iloc[-1]), 3)
+                    vlim2 = None
+                else:
+                    vlim1 = round(float(curves[0][1]["Vf"].max()), 3)
+                    vlim2 = round(float(curves[0][1]["Vf"].min()), 3)
+            else:
+                vinit, vlim1, vlim2 = None, None, None
+            sr = None
             
         else:
             meta, curves = parse_biologic_mpt(raw_text)
@@ -1037,7 +1170,7 @@ if uploaded_files:
             legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01, bgcolor="rgba(0,0,0,0)"),
             height=500
         )
-        st.plotly_chart(fig)
+        st.plotly_chart(fig, use_container_width=True)
         
         if technique == "Linear Sweep Voltammetry (LSV)" and lsv_cat_list:
             c1, c2 = st.columns(2)
@@ -1049,7 +1182,7 @@ if uploaded_files:
                     legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99, bgcolor="rgba(0,0,0,0.5)"),
                     height=500
                 )
-                st.plotly_chart(fig_jeta)
+                st.plotly_chart(fig_jeta, use_container_width=True)
                 
             with c2:
                 fig_tafel.update_layout(
@@ -1060,7 +1193,7 @@ if uploaded_files:
                     legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99, bgcolor="rgba(0,0,0,0.5)"),
                     height=500
                 )
-                st.plotly_chart(fig_tafel)
+                st.plotly_chart(fig_tafel, use_container_width=True)
         
         if results_list:
             st.write("**Recommended Operating Ranges:**")
