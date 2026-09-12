@@ -435,7 +435,6 @@ def parse_biologic_mpt(raw: str):
     return meta, curves
 
 def parse_pstrace_csv(raw: bytes) -> Tuple[Dict[str, str], List[Tuple[str, pd.DataFrame]]]:
-    """Parse PalmSens PSTrace exported CSV files."""
     text = None
     for enc in ['utf-8', 'utf-16', 'latin1']:
         try:
@@ -454,14 +453,12 @@ def parse_pstrace_csv(raw: bytes) -> Tuple[Dict[str, str], List[Tuple[str, pd.Da
     scan_names = []
     unit_row_idx = -1
     
-    # Simple meta extraction for technique
     for line in lines[:20]:
         if "Linear Sweep" in line or "LSV" in line:
             meta["TECHNIQUE"] = "Linear Sweep Voltammetry (LSV)"
         elif "Cyclic Voltammetry" in line or "CV" in line:
             meta["TECHNIQUE"] = "Cyclic Voltammetry (CV)"
     
-    # Find unit row and scan names
     for i, line in enumerate(lines[:50]):
         if ("Scan" in line or "Curve" in line or "vs E" in line) and "Date" not in line and "Voltammetry" in line:
             parts = [p.strip() for p in line.split(",") if p.strip()]
@@ -479,7 +476,6 @@ def parse_pstrace_csv(raw: bytes) -> Tuple[Dict[str, str], List[Tuple[str, pd.Da
         
     unit_parts = [p.strip() for p in lines[unit_row_idx].split(",")]
     
-    # Read the data block
     data_lines = lines[unit_row_idx+1:]
     rows = []
     for line in data_lines:
@@ -509,7 +505,6 @@ def parse_pstrace_csv(raw: bytes) -> Tuple[Dict[str, str], List[Tuple[str, pd.Da
         df_scan = df_raw.iloc[:, [col_v, col_i]].copy()
         df_scan.columns = ["Vf", "Im"]
         
-        # Convert to numeric safely
         df_scan["Vf"] = pd.to_numeric(df_scan["Vf"].astype(str).str.replace(",", "."), errors="coerce")
         df_scan["Im"] = pd.to_numeric(df_scan["Im"].astype(str).str.replace(",", "."), errors="coerce")
         df_scan = df_scan.dropna()
@@ -517,12 +512,10 @@ def parse_pstrace_csv(raw: bytes) -> Tuple[Dict[str, str], List[Tuple[str, pd.Da
         if len(df_scan) == 0:
             continue
             
-        # Unit conversion for Voltage
         v_unit = unit_parts[col_v]
         if "mV" in v_unit:
             df_scan["Vf"] = df_scan["Vf"] / 1000.0
             
-        # Unit conversion for Current (Standardize to Amperes)
         i_unit = unit_parts[col_i]
         if "mA" in i_unit:
             df_scan["Im"] = df_scan["Im"] * 1e-3
@@ -550,13 +543,29 @@ def parse_pstrace_csv(raw: bytes) -> Tuple[Dict[str, str], List[Tuple[str, pd.Da
 def convert_df_to_excel(curves_list: List[Tuple[str, pd.DataFrame]]) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        seen_names = set()
         for cid, df in curves_list:
             Ecol = "Vf" if "Vf" in df.columns else ("Vu" if "Vu" in df.columns else None)
             if Ecol is None or "Im" not in df.columns:
                 continue
             clean_df = df.replace([np.inf, -np.inf], np.nan).dropna(subset=[Ecol, "Im"])
             if len(clean_df) >= 10:
-                clean_df.to_excel(writer, index=False, sheet_name=cid)
+                # Sanitizar nombre de hoja para Excel (limite 31 chars, no caracteres invalidos)
+                safe_name = re.sub(r'[\\*?:/\[\]]', '_', cid)
+                safe_name = safe_name[:31].strip()
+                if not safe_name:
+                    safe_name = "Sheet"
+                
+                # Asegurar nombres unicos por si al truncar quedaron identicos
+                original_safe_name = safe_name
+                counter = 1
+                while safe_name in seen_names:
+                    suffix = f"_{counter}"
+                    safe_name = f"{original_safe_name[:31-len(suffix)]}{suffix}"
+                    counter += 1
+                    
+                seen_names.add(safe_name)
+                clean_df.to_excel(writer, index=False, sheet_name=safe_name)
     return output.getvalue()
 
 # ============================================================
