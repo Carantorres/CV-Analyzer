@@ -97,7 +97,7 @@ def extract_limits_from_data(df: pd.DataFrame, technique: str) -> Tuple[float, f
     return vinit, vlim1, vlim2
 
 def recommend_operating_ranges_for_curve(df_curve, baseline_E_window=0.20, smooth_window=151, smooth_poly=3, local_window=101, threshold_mode="percentile", nr_fixed=1.30, nr_percentile=95, min_run_points=60, I_tol=0.0):
-    Ecol = "Vf" if "Vf" in df_curve.columns else ("Vu" if "Vu" in df_curve.columns else None)
+    Ecol = "Vf" if "Vf" in df_curve.columns else ("Vu" if "Vu" in df_curve.columns None)
     df = df_curve[[Ecol, "Im"]].copy()
     df.columns = ["E", "I"]
     df = df.replace([np.inf, -np.inf], np.nan).dropna().reset_index(drop=True)
@@ -255,7 +255,6 @@ def apply_scientific_style(fig, is_scientific, lx, ly, lxa, lya):
             tickfont=dict(size=15, family="Arial, sans-serif", color="black"), zeroline=False
         )
         
-    # Aplicar la leyenda de forma universal
     fig.update_layout(
         legend=dict(
             x=lx, y=ly, xanchor=lxa, yanchor=lya,
@@ -500,32 +499,6 @@ combined_palette = publication_palette
 dl_config = {'toImageButtonOptions': {'format': 'png', 'filename': 'electrochem_plot', 'height': 720, 'width': 960, 'scale': 4}}
 
 with st.sidebar:
-    st.header("🎨 Plot Formatting")
-    st.markdown("Customize plots for publication.")
-    scientific_style = st.toggle("Scientific Paper Style (ACS/Elsevier)", value=True)
-    show_sd_shadow = st.toggle("Show SD Shadow on Averages", value=True)
-    
-    st.markdown("---")
-    st.markdown("📦 **Legend Position Tool**")
-    leg_pos = st.selectbox("Quick Positions", ["Top-Right", "Top-Left", "Bottom-Right", "Bottom-Left", "Outside Right", "Custom..."])
-    
-    # Logic for legend positioning
-    if leg_pos == "Top-Right":
-        lx, ly, lxa, lya = 0.99, 0.99, "right", "top"
-    elif leg_pos == "Top-Left":
-        lx, ly, lxa, lya = 0.01, 0.99, "left", "top"
-    elif leg_pos == "Bottom-Right":
-        lx, ly, lxa, lya = 0.99, 0.01, "right", "bottom"
-    elif leg_pos == "Bottom-Left":
-        lx, ly, lxa, lya = 0.01, 0.01, "left", "bottom"
-    elif leg_pos == "Outside Right":
-        lx, ly, lxa, lya = 1.02, 1.0, "left", "top"
-    else:
-        lx = st.slider("X Coordinate", min_value=-0.2, max_value=1.5, value=0.99, step=0.01)
-        ly = st.slider("Y Coordinate", min_value=-0.2, max_value=1.5, value=0.99, step=0.01)
-        lxa, lya = "auto", "auto"
-
-    st.markdown("---")
     st.header("⚡ iR Drop Compensation")
     apply_ir = st.toggle("Apply iR Compensation", value=False)
     ru_ohms = st.number_input("Uncompensated Resistance (Ru) [Ohms]", value=10.0, step=1.0) if apply_ir else 0.0
@@ -549,6 +522,30 @@ with st.sidebar:
     manual_scan_rate = st.number_input("Manual Scan Rate (mV/s) [Optional]", value=0.0, step=10.0)
     if convert_to_rhe: st.info("💡 **Tip:** E_rev is generally **0.0 V** for HER and **1.23 V** for OER.")
     e_rev = st.number_input("Thermodynamic Potential (E_rev)", value=0.000, step=0.01)
+
+    st.markdown("---")
+    st.header("🎨 Plot Formatting")
+    st.markdown("Customize plots for publication.")
+    scientific_style = st.toggle("Scientific Paper Style (ACS/Elsevier)", value=True)
+    show_sd_shadow = st.toggle("Show SD Shadow on Averages", value=True)
+    
+    st.markdown("📦 **Legend Position Tool**")
+    leg_pos = st.selectbox("Quick Positions", ["Top-Right", "Top-Left", "Bottom-Right", "Bottom-Left", "Outside Right", "Custom..."])
+    
+    if leg_pos == "Top-Right":
+        lx, ly, lxa, lya = 0.99, 0.99, "right", "top"
+    elif leg_pos == "Top-Left":
+        lx, ly, lxa, lya = 0.01, 0.99, "left", "top"
+    elif leg_pos == "Bottom-Right":
+        lx, ly, lxa, lya = 0.99, 0.01, "right", "bottom"
+    elif leg_pos == "Bottom-Left":
+        lx, ly, lxa, lya = 0.01, 0.01, "left", "bottom"
+    elif leg_pos == "Outside Right":
+        lx, ly, lxa, lya = 1.02, 1.0, "left", "top"
+    else:
+        lx = st.slider("X Coordinate", min_value=-0.2, max_value=1.5, value=0.99, step=0.01)
+        ly = st.slider("Y Coordinate", min_value=-0.2, max_value=1.5, value=0.99, step=0.01)
+        lxa, lya = "auto", "auto"
     
     st.markdown("---")
     st.header("📄 Export Full Report")
@@ -594,10 +591,13 @@ if uploaded_files:
 
     # --- TOP AREA: GROUPED COMPARISONS ---
     has_groups_plotted = False
+    valid_groups_for_super = []
     
     for g_idx, group in enumerate(st.session_state.file_groups):
         if g_idx == 0 or not group["items"]: continue 
         
+        valid_groups_for_super.append(group["header"])
+            
         if not has_groups_plotted:
             st.header("📈 Group Comparisons")
             has_groups_plotted = True
