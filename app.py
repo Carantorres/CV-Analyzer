@@ -20,14 +20,6 @@ st.title("📊 Universal CV & LSV Analyzer")
 st.markdown("Upload your **Gamry (.DTA)**, **Biologic (.mpt)**, or **PSTrace (.csv)** files to visualize potential sweeps and extract catalytic parameters.")
 
 # ============================================================
-# INSTRUMENT SELECTION
-# ============================================================
-instrument = st.selectbox(
-    "Select instrument format:",
-    ["Gamry 1010B (.DTA)", "Biologic SP-50e (.mpt)", "PalmSens PSTrace (.csv)"]
-)
-
-# ============================================================
 # UTILITIES & MATH
 # ============================================================
 def to_rgba(color_str: str, alpha: float = 0.2) -> str:
@@ -231,6 +223,31 @@ def extract_lsv_catalytic_parameters(df_curve: pd.DataFrame, area_cm2: float, e_
         "j_dens": j_dens, "eta_mV": eta_mV
     }
     return params, fit_data
+
+def apply_scientific_style(fig, is_scientific):
+    """Aplica formato riguroso de publicación ACS/Elsevier al gráfico."""
+    if is_scientific:
+        fig.update_layout(
+            title=None, 
+            plot_bgcolor='white',
+            paper_bgcolor='white',
+            font=dict(family="Arial, sans-serif", size=16, color="black"),
+            legend=dict(bgcolor='rgba(255, 255, 255, 0.9)', bordercolor='black', borderwidth=1, font=dict(size=14, color="black")),
+            margin=dict(l=80, r=40, t=40, b=60)
+        )
+        fig.update_xaxes(
+            showgrid=False, showline=True, linecolor='black', linewidth=2,
+            mirror="all", ticks='inside', tickcolor='black', tickwidth=2, ticklen=8,
+            title_font=dict(size=18, family="Arial, sans-serif", color="black"),
+            tickfont=dict(size=15, family="Arial, sans-serif", color="black"), zeroline=False
+        )
+        fig.update_yaxes(
+            showgrid=False, showline=True, linecolor='black', linewidth=2,
+            mirror="all", ticks='inside', tickcolor='black', tickwidth=2, ticklen=8,
+            title_font=dict(size=18, family="Arial, sans-serif", color="black"),
+            tickfont=dict(size=15, family="Arial, sans-serif", color="black"), zeroline=False
+        )
+    return fig
 
 # ============================================================
 # PARSERS
@@ -456,10 +473,23 @@ def convert_df_to_excel(curves_list: List[Tuple[str, pd.DataFrame]]) -> bytes:
 # APP LOGIC
 # ============================================================
 uploaded_files = st.file_uploader("Upload CV/LSV files", type=["DTA", "dta", "mpt", "MPT", "csv", "CSV"], accept_multiple_files=True)
-default_colors = px.colors.qualitative.Plotly
-combined_palette = px.colors.qualitative.Alphabet + px.colors.qualitative.Plotly 
+
+# High contrast publication palette
+publication_palette = [
+    '#000000', '#E41A1C', '#377EB8', '#4DAF4A', '#984EA3', '#FF7F00', '#A65628', '#F781BF', '#17BECF', '#BDB76B', '#000080'
+] + px.colors.qualitative.Alphabet
+combined_palette = publication_palette
+
+# Plotly High-Res Export Config
+dl_config = {'toImageButtonOptions': {'format': 'png', 'filename': 'electrochem_plot', 'height': 720, 'width': 960, 'scale': 4}}
 
 with st.sidebar:
+    st.header("🎨 Plot Formatting")
+    st.markdown("Customize plots for publication.")
+    scientific_style = st.toggle("Scientific Paper Style (ACS/Elsevier)", value=True, help="Applies a clean white background, black borders, inward ticks, and Arial font.")
+    show_sd_shadow = st.toggle("Show SD Shadow on Averages", value=True, help="Displays standard deviation as a shaded area behind averaged curves.")
+
+    st.markdown("---")
     st.header("⚡ iR Drop Compensation")
     apply_ir = st.toggle("Apply iR Compensation", value=False)
     ru_ohms = st.number_input("Uncompensated Resistance (Ru) [Ohms]", value=10.0, step=1.0) if apply_ir else 0.0
@@ -488,6 +518,10 @@ with st.sidebar:
     st.header("📄 Export Full Report")
     components.html("""<button onclick="window.parent.print();" style="background-color:#FF4B4B; color:white; border:none; border-radius:4px; padding:0.5rem 1rem; font-size:1rem; font-weight:600; cursor:pointer; width:100%;">🖨️ Save Page as PDF</button>""", height=50)
 
+# Y-Axis Labels adapted for Science styling
+i_axis_label = "Current, I (A)" if scientific_style else "I (A)"
+j_axis_label = "Current Density, j (mA cm⁻²)" if scientific_style else "Current Density j (mA/cm²)"
+
 if uploaded_files:
     file_dict = {f.name: f for f in uploaded_files}
     display_names = set([f"⋮⋮ {name}" for name in file_dict.keys()])
@@ -510,17 +544,19 @@ if uploaded_files:
 
     # --- TOP AREA: GROUPED COMPARISONS ---
     has_groups_plotted = False
+    valid_groups_for_super = []
     
     for g_idx, group in enumerate(st.session_state.file_groups):
         if g_idx == 0 or not group["items"]: continue 
         
+        valid_groups_for_super.append(group["header"])
+            
         if not has_groups_plotted:
             st.header("📈 Group Comparisons")
             has_groups_plotted = True
             
         st.subheader(f"{group['header']}")
         
-        # 1. Parse and Process everything for this group first
         group_data_parsed = []
         is_group_lsv = False
         
@@ -558,20 +594,17 @@ if uploaded_files:
             if processed_curves:
                 group_data_parsed.append({"fname": fname, "tech": tech_sg, "sr": sr, "curves": processed_curves})
 
-        # 2. UI for Average Toggle & Custom Labels
         avg_group_files = False
         custom_labels = {}
         if len(group_data_parsed) > 0:
             avg_group_files = st.toggle(f"🌟 Plot Averaged Scans per File", key=f"avg_g_{g_idx}", help="Combine multiple cycles into a single average line per file.")
-            
             if avg_group_files:
-                st.markdown("**Customize Legend Labels (e.g. '10 mV/s'):**")
+                st.markdown("**Customize Legend Labels:**")
                 cols = st.columns(3)
                 for i, dat in enumerate(group_data_parsed):
                     def_val = f"{dat['sr']} mV/s" if dat['sr'] else dat['fname']
                     custom_labels[dat['fname']] = cols[i%3].text_input(f"Label for {dat['fname']}", value=def_val, key=f"lbl_g_{g_idx}_{dat['fname']}")
 
-        # 3. Plotting loop
         fig_comp, fig_tafel_comp, fig_jeta_comp = go.Figure(), go.Figure(), go.Figure()
         trace_idx, group_lsv_params, max_log_I_global = 0, [], -10 
         
@@ -584,10 +617,10 @@ if uploaded_files:
                 df_mean = pd.DataFrame({"Vf": E_mean, "Im": I_mean})
                 trace_name = custom_labels[fname]
                 
-                # Raw Plot with Shading
-                fig_comp.add_trace(go.Scatter(x=E_mean, y=I_mean+I_std, mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
-                fig_comp.add_trace(go.Scatter(x=E_mean, y=I_mean-I_std, mode='lines', line=dict(width=0), fill='tonexty', fillcolor=to_rgba(c_color, 0.2), showlegend=False, hoverinfo='skip'))
-                fig_comp.add_trace(go.Scatter(x=E_mean, y=I_mean, mode='lines', name=trace_name, line=dict(color=c_color, width=2)))
+                if show_sd_shadow:
+                    fig_comp.add_trace(go.Scatter(x=E_mean, y=I_mean+I_std, mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
+                    fig_comp.add_trace(go.Scatter(x=E_mean, y=I_mean-I_std, mode='lines', line=dict(width=0), fill='tonexty', fillcolor=to_rgba(c_color, 0.2), showlegend=False, hoverinfo='skip'))
+                fig_comp.add_trace(go.Scatter(x=E_mean, y=I_mean, mode='lines', name=trace_name, line=dict(color=c_color, width=2.5)))
                 
                 if "LSV" in tech:
                     cat_params, fit_data = extract_lsv_catalytic_parameters(df_mean, electrode_area, e_rev)
@@ -595,13 +628,20 @@ if uploaded_files:
                         cat_params = {"File": trace_name, "Curve": "Average", **cat_params}
                         group_lsv_params.append(cat_params)
                         max_log_I_global = max(max_log_I_global, fit_data["log_I_max"])
-                        fig_tafel_comp.add_trace(go.Scatter(x=fit_data["log_I_full"], y=fit_data["E_full"], mode='lines', name=trace_name, line=dict(color=c_color, width=2)))
+                        fig_tafel_comp.add_trace(go.Scatter(x=fit_data["log_I_full"], y=fit_data["E_full"], mode='lines', name=trace_name, line=dict(color=c_color, width=2.5)))
                         if not np.isnan(fit_data["slope"]) and len(fit_data["log_I_fit"]) > 0:
                             min_x, max_x = np.min(fit_data["log_I_fit"]), np.max(fit_data["log_I_fit"])
                             span = max_x - min_x
                             fit_x = np.array([min_x - (span*1.5), max_x + (span*1.5)])
                             fig_tafel_comp.add_trace(go.Scatter(x=fit_x, y=fit_data["slope"]*fit_x + fit_data["intercept"], mode='lines', name=f"Fit: {cat_params['Tafel Slope (mV/dec)']:.1f} mV/dec", line=dict(color=c_color, width=2, dash='dot')))
-                        fig_jeta_comp.add_trace(go.Scatter(x=fit_data["eta_mV"], y=fit_data["j_dens"], mode='lines', name=trace_name, line=dict(color=c_color, width=2)))
+                        
+                        # Add shadow for j vs eta too if requested
+                        if show_sd_shadow:
+                            j_dens = (I_mean * 1000) / electrode_area
+                            j_std = (I_std * 1000) / electrode_area
+                            fig_jeta_comp.add_trace(go.Scatter(x=fit_data["eta_mV"], y=j_dens+j_std, mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
+                            fig_jeta_comp.add_trace(go.Scatter(x=fit_data["eta_mV"], y=j_dens-j_std, mode='lines', line=dict(width=0), fill='tonexty', fillcolor=to_rgba(c_color, 0.2), showlegend=False, hoverinfo='skip'))
+                        fig_jeta_comp.add_trace(go.Scatter(x=fit_data["eta_mV"], y=fit_data["j_dens"], mode='lines', name=trace_name, line=dict(color=c_color, width=2.5)))
                 trace_idx += 1
                 
             else:
@@ -624,17 +664,20 @@ if uploaded_files:
                             fig_jeta_comp.add_trace(go.Scatter(x=fit_data["eta_mV"], y=fit_data["j_dens"], mode='lines', name=trace_name, line=dict(color=c_color, width=2)))
                     trace_idx += 1
                         
-        fig_comp.update_layout(title="Raw Data (E vs I)", xaxis_title=x_axis_label, yaxis_title="I (A)", legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99, bgcolor="rgba(0,0,0,0.5)"), height=500)
-        st.plotly_chart(fig_comp, use_container_width=True)
+        fig_comp.update_layout(title="Raw Data" if not scientific_style else None, xaxis_title=x_axis_label, yaxis_title=i_axis_label, legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99), height=500)
+        fig_comp = apply_scientific_style(fig_comp, scientific_style)
+        st.plotly_chart(fig_comp, use_container_width=True, config=dl_config)
         
         if is_group_lsv:
             c1, c2 = st.columns(2)
             with c1:
-                fig_jeta_comp.update_layout(title="Catalytic Performance (j vs η)", xaxis_title="Overpotential η (mV)", yaxis_title="Current Density j (mA/cm²)", legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99, bgcolor="rgba(0,0,0,0.5)"), height=500)
-                st.plotly_chart(fig_jeta_comp, use_container_width=True)
+                fig_jeta_comp.update_layout(title="Catalytic Performance" if not scientific_style else None, xaxis_title="Overpotential η (mV)", yaxis_title=j_axis_label, legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99), height=500)
+                fig_jeta_comp = apply_scientific_style(fig_jeta_comp, scientific_style)
+                st.plotly_chart(fig_jeta_comp, use_container_width=True, config=dl_config)
             with c2:
-                fig_tafel_comp.update_layout(title="Tafel Plot (log₁₀|I| vs E)", xaxis_title="log₁₀|I| (A)", yaxis_title=x_axis_label, xaxis=dict(range=[max_log_I_global - 4.5, max_log_I_global + 0.2]), legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99, bgcolor="rgba(0,0,0,0.5)"), height=500)
-                st.plotly_chart(fig_tafel_comp, use_container_width=True)
+                fig_tafel_comp.update_layout(title="Tafel Plot" if not scientific_style else None, xaxis_title="log₁₀|I| (A)", yaxis_title=x_axis_label, xaxis=dict(range=[max_log_I_global - 4.5, max_log_I_global + 0.2]), legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99), height=500)
+                fig_tafel_comp = apply_scientific_style(fig_tafel_comp, scientific_style)
+                st.plotly_chart(fig_tafel_comp, use_container_width=True, config=dl_config)
         
         if group_lsv_params:
             st.markdown("#### 🧪 Group Catalytic Statistics (LSV)")
@@ -710,15 +753,16 @@ if uploaded_files:
         fig, fig_tafel, fig_jeta = go.Figure(), go.Figure(), go.Figure()
         results_list, lsv_cat_list, max_log_I_ind = [], [], -10
 
-        avg_cycles = st.toggle(f"🌟 Average {len(processed_curves)} Cycles/Scans (Show Standard Deviation)", key=f"avg_{file.name}") if len(processed_curves) > 1 else False
+        avg_cycles = st.toggle(f"🌟 Average {len(processed_curves)} Cycles/Scans", key=f"avg_{file.name}") if len(processed_curves) > 1 else False
 
         if avg_cycles:
             E_mean, I_mean, I_std = get_averaged_curve(processed_curves)
-            mean_color = 'rgba(255, 75, 75, 1)' 
+            mean_color = combined_palette[0]
             
-            fig.add_trace(go.Scatter(x=E_mean, y=I_mean + I_std, mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
-            fig.add_trace(go.Scatter(x=E_mean, y=I_mean - I_std, mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(255, 75, 75, 0.2)', showlegend=False, hoverinfo='skip'))
-            fig.add_trace(go.Scatter(x=E_mean, y=I_mean, mode='lines', name='Average ± SD', line=dict(color=mean_color, width=2)))
+            if show_sd_shadow:
+                fig.add_trace(go.Scatter(x=E_mean, y=I_mean + I_std, mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
+                fig.add_trace(go.Scatter(x=E_mean, y=I_mean - I_std, mode='lines', line=dict(width=0), fill='tonexty', fillcolor=to_rgba(mean_color, 0.2), showlegend=False, hoverinfo='skip'))
+            fig.add_trace(go.Scatter(x=E_mean, y=I_mean, mode='lines', name='Average', line=dict(color=mean_color, width=2.5)))
             
             df_mean = pd.DataFrame({"Vf": E_mean, "Im": I_mean})
             out = recommend_operating_ranges_for_curve(df_mean)
@@ -731,16 +775,21 @@ if uploaded_files:
                     cat_params = {"Curve": "Average Curve", **cat_params}
                     lsv_cat_list.append(cat_params)
                     max_log_I_ind = max(max_log_I_ind, fit_data["log_I_max"])
-                    fig_tafel.add_trace(go.Scatter(x=fit_data["log_I_full"], y=fit_data["E_full"], mode='lines', name="Average (Log Curve)", line=dict(color=mean_color, width=2)))
+                    fig_tafel.add_trace(go.Scatter(x=fit_data["log_I_full"], y=fit_data["E_full"], mode='lines', name="Average (Log Curve)", line=dict(color=mean_color, width=2.5)))
                     if not np.isnan(fit_data["slope"]) and len(fit_data["log_I_fit"]) > 0:
                         min_x, max_x = np.min(fit_data["log_I_fit"]), np.max(fit_data["log_I_fit"])
                         span = max_x - min_x
                         fit_x = np.array([min_x - (span*1.5), max_x + (span*1.5)])
                         fig_tafel.add_trace(go.Scatter(x=fit_x, y=fit_data["slope"]*fit_x + fit_data["intercept"], mode='lines', name=f"Fit: {cat_params['Tafel Slope (mV/dec)']:.1f} mV/dec", line=dict(color=mean_color, width=2, dash='dot')))
-                    fig_jeta.add_trace(go.Scatter(x=fit_data["eta_mV"], y=fit_data["j_dens"], mode='lines', name="Average Curve", line=dict(color=mean_color, width=2)))
+                    
+                    if show_sd_shadow:
+                        j_dens, j_std = (I_mean * 1000) / electrode_area, (I_std * 1000) / electrode_area
+                        fig_jeta.add_trace(go.Scatter(x=fit_data["eta_mV"], y=j_dens+j_std, mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
+                        fig_jeta.add_trace(go.Scatter(x=fit_data["eta_mV"], y=j_dens-j_std, mode='lines', line=dict(width=0), fill='tonexty', fillcolor=to_rgba(mean_color, 0.2), showlegend=False, hoverinfo='skip'))
+                    fig_jeta.add_trace(go.Scatter(x=fit_data["eta_mV"], y=fit_data["j_dens"], mode='lines', name="Average", line=dict(color=mean_color, width=2.5)))
         else:
             for i, (cid, dd, Ecol) in enumerate(processed_curves):
-                line_color = default_colors[i % len(default_colors)]
+                line_color = combined_palette[i % len(combined_palette)]
                 fig.add_trace(go.Scatter(x=dd[Ecol], y=dd["Im"], mode='lines', name=cid, line=dict(color=line_color, width=2)))
                 out = recommend_operating_ranges_for_curve(dd)
                 ns, ro = out["recommended_noise_safe_V"], out["recommended_reduction_only_V"]
@@ -752,7 +801,7 @@ if uploaded_files:
                         cat_params = {"Curve": cid, **cat_params}
                         lsv_cat_list.append(cat_params)
                         max_log_I_ind = max(max_log_I_ind, fit_data["log_I_max"])
-                        fig_tafel.add_trace(go.Scatter(x=fit_data["log_I_full"], y=fit_data["E_full"], mode='lines', name=f"{cid} (Log Curve)", line=dict(color=line_color, width=2)))
+                        fig_tafel.add_trace(go.Scatter(x=fit_data["log_I_full"], y=fit_data["E_full"], mode='lines', name=f"{cid}", line=dict(color=line_color, width=2)))
                         if not np.isnan(fit_data["slope"]) and len(fit_data["log_I_fit"]) > 0:
                             min_x, max_x = np.min(fit_data["log_I_fit"]), np.max(fit_data["log_I_fit"])
                             span = max_x - min_x
@@ -760,17 +809,20 @@ if uploaded_files:
                             fig_tafel.add_trace(go.Scatter(x=fit_x, y=fit_data["slope"]*fit_x + fit_data["intercept"], mode='lines', name=f"Fit: {cat_params['Tafel Slope (mV/dec)']:.1f} mV/dec", line=dict(color=line_color, width=2, dash='dot')))
                         fig_jeta.add_trace(go.Scatter(x=fit_data["eta_mV"], y=fit_data["j_dens"], mode='lines', name=cid, line=dict(color=line_color, width=2)))
 
-        fig.update_layout(title="Raw Data (E vs I)", xaxis_title=x_axis_label, yaxis_title="I (A)", legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01, bgcolor="rgba(0,0,0,0)"), height=500)
-        st.plotly_chart(fig, use_container_width=True)
+        fig.update_layout(title="Raw Data" if not scientific_style else None, xaxis_title=x_axis_label, yaxis_title=i_axis_label, legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01), height=500)
+        fig = apply_scientific_style(fig, scientific_style)
+        st.plotly_chart(fig, use_container_width=True, config=dl_config)
         
         if "LSV" in technique and lsv_cat_list:
             c1, c2 = st.columns(2)
             with c1:
-                fig_jeta.update_layout(title="Catalytic Performance (j vs η)", xaxis_title="Overpotential η (mV)", yaxis_title="Current Density j (mA/cm²)", legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99, bgcolor="rgba(0,0,0,0.5)"), height=500)
-                st.plotly_chart(fig_jeta, use_container_width=True)
+                fig_jeta.update_layout(title="Catalytic Performance" if not scientific_style else None, xaxis_title="Overpotential η (mV)", yaxis_title=j_axis_label, legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99), height=500)
+                fig_jeta = apply_scientific_style(fig_jeta, scientific_style)
+                st.plotly_chart(fig_jeta, use_container_width=True, config=dl_config)
             with c2:
-                fig_tafel.update_layout(title="Tafel Plot (log₁₀|I| vs E)", xaxis_title="log₁₀|I| (A)", yaxis_title=x_axis_label, xaxis=dict(range=[max_log_I_ind - 4.5, max_log_I_ind + 0.2]), legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99, bgcolor="rgba(0,0,0,0.5)"), height=500)
-                st.plotly_chart(fig_tafel, use_container_width=True)
+                fig_tafel.update_layout(title="Tafel Plot" if not scientific_style else None, xaxis_title="log₁₀|I| (A)", yaxis_title=x_axis_label, xaxis=dict(range=[max_log_I_ind - 4.5, max_log_I_ind + 0.2]), legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99), height=500)
+                fig_tafel = apply_scientific_style(fig_tafel, scientific_style)
+                st.plotly_chart(fig_tafel, use_container_width=True, config=dl_config)
         
         if results_list: st.write("**Recommended Operating Ranges:**"); st.dataframe(pd.DataFrame(results_list), use_container_width=True)
         if lsv_cat_list: st.write("**🧪 Catalytic Parameters:**"); st.dataframe(pd.DataFrame(lsv_cat_list), use_container_width=True)
