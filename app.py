@@ -20,6 +20,14 @@ st.title("📊 Universal CV & LSV Analyzer")
 st.markdown("Upload your **Gamry (.DTA)**, **Biologic (.mpt)**, or **PSTrace (.csv)** files to visualize potential sweeps and extract catalytic parameters.")
 
 # ============================================================
+# INSTRUMENT SELECTION
+# ============================================================
+instrument = st.selectbox(
+    "Select instrument format:",
+    ["Gamry 1010B (.DTA)", "Biologic SP-50e (.mpt)", "PalmSens PSTrace (.csv)"]
+)
+
+# ============================================================
 # UTILITIES & MATH
 # ============================================================
 def to_rgba(color_str: str, alpha: float = 0.2) -> str:
@@ -225,7 +233,6 @@ def extract_lsv_catalytic_parameters(df_curve: pd.DataFrame, area_cm2: float, e_
     return params, fit_data
 
 def apply_scientific_style(fig, is_scientific):
-    """Aplica formato riguroso de publicación ACS/Elsevier al gráfico."""
     if is_scientific:
         fig.update_layout(
             title=None, 
@@ -635,7 +642,6 @@ if uploaded_files:
                             fit_x = np.array([min_x - (span*1.5), max_x + (span*1.5)])
                             fig_tafel_comp.add_trace(go.Scatter(x=fit_x, y=fit_data["slope"]*fit_x + fit_data["intercept"], mode='lines', name=f"Fit: {cat_params['Tafel Slope (mV/dec)']:.1f} mV/dec", line=dict(color=c_color, width=2, dash='dot')))
                         
-                        # Add shadow for j vs eta too if requested
                         if show_sd_shadow:
                             j_dens = (I_mean * 1000) / electrode_area
                             j_std = (I_std * 1000) / electrode_area
