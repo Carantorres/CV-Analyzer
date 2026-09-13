@@ -45,7 +45,7 @@ with st.popover("📖 View Calculation Methods & Algorithms"):
     
     **5. Scan Rate Kinetics ($b$-value Analysis)**
     *   Based on the power-law relationship $i_p = a \\cdot v^b$, the anodic peak current density ($j_{pa}$) is analyzed as a function of the scan rate ($v$).
-    *   The algorithm extracts the absolute maximum anodic current $j_{pa}$ and its potential $E_{pa}$ for each trace.
+    *   The algorithm extracts the absolute maximum anodic current $j_{pa}$ and its potential $E_{pa}$ for each trace (optionally within a user-defined potential window to avoid edge artifacts).
     *   A linear regression of $\\log_{10}(j_{pa})$ vs $\\log_{10}(v)$ calculates the slope $b$ and its standard error. A value of $b=0.5$ implies a diffusion-controlled process, while $b=1.0$ indicates a surface-confined (capacitive) process.
     """)
 
@@ -572,6 +572,18 @@ with st.sidebar:
     e_rev = st.number_input("Thermodynamic Potential (E_rev)", value=0.000, step=0.01)
 
     st.markdown("---")
+    st.header("🔋 Peak Search (Kinetics)")
+    limit_peak_search = st.toggle("Limit Peak Search Window", value=False, help="Avoid edges or secondary reactions by defining where the actual peak is located.")
+    if limit_peak_search:
+        c_min, c_max = st.columns(2)
+        with c_min:
+            peak_min_v = st.number_input("Min E (V)", value=0.20, step=0.05)
+        with c_max:
+            peak_max_v = st.number_input("Max E (V)", value=0.60, step=0.05)
+    else:
+        peak_min_v, peak_max_v = None, None
+
+    st.markdown("---")
     st.header("🎨 Plot Formatting")
     st.markdown("Customize plots for publication.")
     scientific_style = st.toggle("Scientific Paper Style (ACS/Elsevier)", value=True)
@@ -920,9 +932,27 @@ if uploaded_files:
                             
                         # Capture Scan Rate kinetics if CV
                         if not g_data["is_lsv"] and tr.get("sr") and tr["sr"] > 0:
-                            max_idx = np.argmax(tr["y"])
-                            i_pa = tr["y"][max_idx]
-                            E_pa = tr["x"][max_idx]
+                            x_vals = np.array(tr["x"])
+                            y_vals = np.array(tr["y"])
+                            
+                            # Applies peak limits if user activated them
+                            if limit_peak_search and peak_min_v is not None and peak_max_v is not None:
+                                mask = (x_vals >= peak_min_v) & (x_vals <= peak_max_v)
+                                if np.any(mask):
+                                    x_masked = x_vals[mask]
+                                    y_masked = y_vals[mask]
+                                    max_idx_masked = np.argmax(y_masked)
+                                    i_pa = y_masked[max_idx_masked]
+                                    E_pa = x_masked[max_idx_masked]
+                                else:
+                                    max_idx = np.argmax(y_vals)
+                                    i_pa = y_vals[max_idx]
+                                    E_pa = x_vals[max_idx]
+                            else:
+                                max_idx = np.argmax(y_vals)
+                                i_pa = y_vals[max_idx]
+                                E_pa = x_vals[max_idx]
+                                
                             j_pa = (i_pa * 1000) / electrode_area
                             
                             if j_pa > 0:
@@ -1119,18 +1149,18 @@ if uploaded_files:
                             fig_tafel.add_trace(go.Scatter(x=fit_x, y=fit_data["slope"]*fit_x + fit_data["intercept"], mode='lines', name=f"Fit: {cat_params['Tafel Slope (mV/dec)']:.1f} mV/dec", line=dict(color=line_color, width=2, dash='dot')))
                         fig_jeta.add_trace(go.Scatter(x=fit_data["eta_mV"], y=fit_data["j_dens"], mode='lines', name=cid, line=dict(color=line_color, width=2)))
 
-        fig.update_layout(title="", xaxis_title=x_axis_label, yaxis_title=i_axis_label, height=500)
+        fig.update_layout(title="Raw Data" if not scientific_style else "", xaxis_title=x_axis_label, yaxis_title=i_axis_label, height=500)
         fig = apply_scientific_style(fig, scientific_style, lx, ly, lxa, lya)
         st.plotly_chart(fig, use_container_width=True, config=dl_config)
         
         if "LSV" in technique and lsv_cat_list:
             c1, c2 = st.columns(2)
             with c1:
-                fig_jeta.update_layout(title="", xaxis_title="Overpotential η (mV)", yaxis_title=j_axis_label, height=500)
+                fig_jeta.update_layout(title="Catalytic Performance" if not scientific_style else "", xaxis_title="Overpotential η (mV)", yaxis_title=j_axis_label, height=500)
                 fig_jeta = apply_scientific_style(fig_jeta, scientific_style, lx, ly, lxa, lya)
                 st.plotly_chart(fig_jeta, use_container_width=True, config=dl_config)
             with c2:
-                fig_tafel.update_layout(title="", xaxis_title="log₁₀|I| (A)", yaxis_title=x_axis_label, xaxis=dict(range=[max_log_I_ind - 4.5, max_log_I_ind + 0.2]), height=500)
+                fig_tafel.update_layout(title="Tafel Plot" if not scientific_style else "", xaxis_title="log₁₀|I| (A)", yaxis_title=x_axis_label, xaxis=dict(range=[max_log_I_ind - 4.5, max_log_I_ind + 0.2]), height=500)
                 fig_tafel = apply_scientific_style(fig_tafel, scientific_style, lx, ly, lxa, lya)
                 st.plotly_chart(fig_tafel, use_container_width=True, config=dl_config)
         
