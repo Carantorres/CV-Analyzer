@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
-from scipy.signal import savgol_filter
+from scipy.signal import savgol_filter, find_peaks
 from scipy.stats import linregress
 import streamlit as st
 import streamlit.components.v1 as components
@@ -43,9 +43,9 @@ with st.popover("📖 View Calculation Methods & Algorithms"):
     **4. Operating Range Detection**
     *   **Noise-Free Electrodeposition Window:** Uses a **Savitzky-Golay filter** coupled with **Median Absolute Deviation (MAD)** to estimate local signal-to-noise ratios. It automatically discards segments with intense faradaic noise (e.g., massive hydrogen bubbling) to recommend a stable and reliable potential window.
     
-    **5. Scan Rate Kinetics ($b$-value Analysis)**
+    **5. Scan Rate Kinetics ($b$-value Smart Detection)**
     *   Based on the power-law relationship $i_p = a \\cdot v^b$, the anodic peak current density ($j_{pa}$) is analyzed as a function of the scan rate ($v$).
-    *   The algorithm extracts the absolute maximum anodic current $j_{pa}$ and its potential $E_{pa}$ for each trace (optionally within a user-defined potential window to avoid edge artifacts).
+    *   The algorithm isolates the forward anodic sweep and uses `scipy.signal.find_peaks` to strictly identify mathematical local maxima (true peaks where the derivative crosses zero). This makes it immune to edge artifacts and secondary reactions at the extremes of the potential window.
     *   A linear regression of $\\log_{10}(j_{pa})$ vs $\\log_{10}(v)$ calculates the slope $b$ and its standard error. A value of $b=0.5$ implies a diffusion-controlled process, while $b=1.0$ indicates a surface-confined (capacitive) process.
     """)
 
@@ -930,28 +930,47 @@ if uploaded_files:
                         else:
                             final_name = f"{sg_custom_labels[g_name]} - {tr['name']}"
                             
-                        # Capture Scan Rate kinetics if CV
+                        # Capture Scan Rate kinetics if CV (Smart Peak Detection)
                         if not g_data["is_lsv"] and tr.get("sr") and tr["sr"] > 0:
                             x_vals = np.array(tr["x"])
                             y_vals = np.array(tr["y"])
                             
-                            # Applies peak limits if user activated them
+                            # Isolate the anodic (forward positive-going) sweep
+                            split_idx = np.argmax(x_vals) if len(x_vals) > 0 else 0
+                            x_anodic = x_vals[:split_idx+1] if split_idx > 0 else x_vals
+                            y_anodic = y_vals[:split_idx+1] if split_idx > 0 else y_vals
+                            
                             if limit_peak_search and peak_min_v is not None and peak_max_v is not None:
-                                mask = (x_vals >= peak_min_v) & (x_vals <= peak_max_v)
+                                mask = (x_anodic >= peak_min_v) & (x_anodic <= peak_max_v)
                                 if np.any(mask):
-                                    x_masked = x_vals[mask]
-                                    y_masked = y_vals[mask]
-                                    max_idx_masked = np.argmax(y_masked)
-                                    i_pa = y_masked[max_idx_masked]
-                                    E_pa = x_masked[max_idx_masked]
+                                    x_masked = x_anodic[mask]
+                                    y_masked = y_anodic[mask]
+                                    
+                                    # Find true mathematical peaks inside the window
+                                    peaks, _ = find_peaks(y_masked)
+                                    if len(peaks) > 0:
+                                        best_peak_idx = peaks[np.argmax(y_masked[peaks])]
+                                        i_pa = y_masked[best_peak_idx]
+                                        E_pa = x_masked[best_peak_idx]
+                                    else:
+                                        # Fallback
+                                        max_idx = np.argmax(y_masked)
+                                        i_pa = y_masked[max_idx]
+                                        E_pa = x_masked[max_idx]
                                 else:
-                                    max_idx = np.argmax(y_vals)
-                                    i_pa = y_vals[max_idx]
-                                    E_pa = x_vals[max_idx]
+                                    max_idx = np.argmax(y_anodic)
+                                    i_pa = y_anodic[max_idx]
+                                    E_pa = x_anodic[max_idx]
                             else:
-                                max_idx = np.argmax(y_vals)
-                                i_pa = y_vals[max_idx]
-                                E_pa = x_vals[max_idx]
+                                peaks, _ = find_peaks(y_anodic)
+                                if len(peaks) > 0:
+                                    best_peak_idx = peaks[np.argmax(y_anodic[peaks])]
+                                    i_pa = y_anodic[best_peak_idx]
+                                    E_pa = x_anodic[best_peak_idx]
+                                else:
+                                    max_idx = np.argmax(y_anodic)
+                                    i_pa = y_anodic[max_idx]
+                                    E_pa = x_anodic[max_idx]
                                 
                             j_pa = (i_pa * 1000) / electrode_area
                             
