@@ -506,15 +506,26 @@ with st.sidebar:
 
     st.markdown("---")
     st.header("⚖️ Reference Electrode & RHE")
+    ref_elec = st.selectbox("Reference Electrode", ["Ag/AgCl (sat. KCl)", "SCE (sat. KCl)", "Hg/HgO (1M KOH)", "Custom"])
+    
+    if ref_elec == "Custom":
+        custom_ref_name = st.text_input("Custom Reference Label", value="Ref.")
+    else:
+        custom_ref_name = ref_elec.split(" (")[0]
+        
     convert_to_rhe = st.toggle("Convert E to RHE scale", value=True)
+    
     if convert_to_rhe:
-        ref_elec = st.selectbox("Reference Electrode", ["Ag/AgCl (sat. KCl)", "SCE (sat. KCl)", "Hg/HgO (1M KOH)", "Custom"])
-        e0_ref = 0.197 if ref_elec.startswith("Ag") else (0.241 if ref_elec.startswith("SCE") else (0.098 if ref_elec.startswith("Hg") else st.number_input("Custom E0_Ref (V)", 0.0, step=0.01)))
+        if ref_elec == "Custom":
+            e0_ref = st.number_input("Custom E0_Ref (V)", value=0.000, step=0.01)
+        else:
+            e0_ref = 0.197 if ref_elec.startswith("Ag") else (0.241 if ref_elec.startswith("SCE") else 0.098)
+            st.info(f"Using Standard E₀ = {e0_ref} V")
         ph_val = st.number_input("pH of the solution", value=14.0, step=0.1)
         x_axis_label = "E (V vs RHE)" + (" [iR corrected]" if apply_ir else "")
     else:
         e0_ref, ph_val = 0.0, 0.0
-        x_axis_label = "E (V vs Ref.)" + (" [iR corrected]" if apply_ir else "")
+        x_axis_label = f"E (V vs {custom_ref_name})" + (" [iR corrected]" if apply_ir else "")
 
     st.markdown("---")
     st.header("⚙️ Catalytic Parameters")
