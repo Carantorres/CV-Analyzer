@@ -16,18 +16,15 @@ from streamlit_sortables import sort_items
 # PAGE CONFIGURATION
 # ============================================================
 st.set_page_config(page_title="CV Analyzer", layout="wide")
-
 st.title("📊 Universal CV & LSV Analyzer")
 
 st.markdown("""
 **A comprehensive tool for automated electrochemical data analysis.** 
 Seamlessly process CV and LSV files from **Gamry (.DTA)**, **Biologic (.mpt)**, and **PalmSens PSTrace (.csv)** potentiostats. 
 This platform automates iR drop compensation, RHE scale conversion, and robust catalytic parameter extraction. Additionally, it features an operating range algorithm that detects noise-free potential windows—avoiding hydrogen evolution and intense oxidation currents—ideal for applications like metal electrodeposition.
-
-*Developed by PhD(c) Carlos A. Torres-Ramírez.*
 """)
 
-with st.expander("📖 Calculation Methods & Algorithms"):
+with st.popover("📖 View Calculation Methods & Algorithms"):
     st.markdown("""
     **1. Physico-Chemical Corrections**
     *   **iR Drop Compensation:** Corrects for the uncompensated resistance ($R_u$) of the electrolyte using Ohm's Law: 
