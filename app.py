@@ -236,7 +236,7 @@ def apply_scientific_style(fig, is_scientific, lx, ly, lxa, lya):
     """Aplica el estilo editorial y posiciona la leyenda de forma personalizada."""
     if is_scientific:
         fig.update_layout(
-            title=None, 
+            title="", 
             plot_bgcolor='white',
             paper_bgcolor='white',
             font=dict(family="Arial, sans-serif", size=16, color="black"),
@@ -721,18 +721,18 @@ if uploaded_files:
                             fig_jeta_comp.add_trace(go.Scatter(x=fit_data["eta_mV"], y=fit_data["j_dens"], mode='lines', name=trace_name, line=dict(color=c_color, width=2)))
                     trace_idx += 1
                         
-        fig_comp.update_layout(title="Raw Data" if not scientific_style else None, xaxis_title=x_axis_label, yaxis_title=i_axis_label, height=500)
+        fig_comp.update_layout(title="Raw Data" if not scientific_style else "", xaxis_title=x_axis_label, yaxis_title=i_axis_label, height=500)
         fig_comp = apply_scientific_style(fig_comp, scientific_style, lx, ly, lxa, lya)
         st.plotly_chart(fig_comp, use_container_width=True, config=dl_config)
         
         if is_group_lsv:
             c1, c2 = st.columns(2)
             with c1:
-                fig_jeta_comp.update_layout(title="Catalytic Performance" if not scientific_style else None, xaxis_title="Overpotential η (mV)", yaxis_title=j_axis_label, height=500)
+                fig_jeta_comp.update_layout(title="Catalytic Performance" if not scientific_style else "", xaxis_title="Overpotential η (mV)", yaxis_title=j_axis_label, height=500)
                 fig_jeta_comp = apply_scientific_style(fig_jeta_comp, scientific_style, lx, ly, lxa, lya)
                 st.plotly_chart(fig_jeta_comp, use_container_width=True, config=dl_config)
             with c2:
-                fig_tafel_comp.update_layout(title="Tafel Plot" if not scientific_style else None, xaxis_title="log₁₀|I| (A)", yaxis_title=x_axis_label, xaxis=dict(range=[max_log_I_global - 4.5, max_log_I_global + 0.2]), height=500)
+                fig_tafel_comp.update_layout(title="Tafel Plot" if not scientific_style else "", xaxis_title="log₁₀|I| (A)", yaxis_title=x_axis_label, xaxis=dict(range=[max_log_I_global - 4.5, max_log_I_global + 0.2]), height=500)
                 fig_tafel_comp = apply_scientific_style(fig_tafel_comp, scientific_style, lx, ly, lxa, lya)
                 st.plotly_chart(fig_tafel_comp, use_container_width=True, config=dl_config)
         
@@ -866,18 +866,18 @@ if uploaded_files:
                             fig_tafel.add_trace(go.Scatter(x=fit_x, y=fit_data["slope"]*fit_x + fit_data["intercept"], mode='lines', name=f"Fit: {cat_params['Tafel Slope (mV/dec)']:.1f} mV/dec", line=dict(color=line_color, width=2, dash='dot')))
                         fig_jeta.add_trace(go.Scatter(x=fit_data["eta_mV"], y=fit_data["j_dens"], mode='lines', name=cid, line=dict(color=line_color, width=2)))
 
-        fig.update_layout(title="Raw Data" if not scientific_style else None, xaxis_title=x_axis_label, yaxis_title=i_axis_label, height=500)
+        fig.update_layout(title="Raw Data" if not scientific_style else "", xaxis_title=x_axis_label, yaxis_title=i_axis_label, height=500)
         fig = apply_scientific_style(fig, scientific_style, lx, ly, lxa, lya)
         st.plotly_chart(fig, use_container_width=True, config=dl_config)
         
         if "LSV" in technique and lsv_cat_list:
             c1, c2 = st.columns(2)
             with c1:
-                fig_jeta.update_layout(title="Catalytic Performance" if not scientific_style else None, xaxis_title="Overpotential η (mV)", yaxis_title=j_axis_label, height=500)
+                fig_jeta.update_layout(title="Catalytic Performance" if not scientific_style else "", xaxis_title="Overpotential η (mV)", yaxis_title=j_axis_label, height=500)
                 fig_jeta = apply_scientific_style(fig_jeta, scientific_style, lx, ly, lxa, lya)
                 st.plotly_chart(fig_jeta, use_container_width=True, config=dl_config)
             with c2:
-                fig_tafel.update_layout(title="Tafel Plot" if not scientific_style else None, xaxis_title="log₁₀|I| (A)", yaxis_title=x_axis_label, xaxis=dict(range=[max_log_I_ind - 4.5, max_log_I_ind + 0.2]), height=500)
+                fig_tafel.update_layout(title="Tafel Plot" if not scientific_style else "", xaxis_title="log₁₀|I| (A)", yaxis_title=x_axis_label, xaxis=dict(range=[max_log_I_ind - 4.5, max_log_I_ind + 0.2]), height=500)
                 fig_tafel = apply_scientific_style(fig_tafel, scientific_style, lx, ly, lxa, lya)
                 st.plotly_chart(fig_tafel, use_container_width=True, config=dl_config)
         
