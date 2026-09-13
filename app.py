@@ -69,6 +69,18 @@ def to_rgba(color_str: str, alpha: float = 0.2) -> str:
         return color_str.replace('rgb(', 'rgba(').replace(')', f', {alpha})')
     return f"rgba(150, 150, 150, {alpha})"
 
+def _to_float(x):
+    if x is None: return None
+    try: return float(str(x).replace(",", "."))
+    except: return None
+
+def mad_sigma(x: np.ndarray) -> float:
+    x = x[np.isfinite(x)]
+    if len(x) < 10: return float(np.std(x)) if len(x) else np.nan
+    med = np.median(x)
+    mad = np.median(np.abs(x - med))
+    return 1.4826 * mad if mad > 0 else float(np.std(x))
+
 def get_sr_from_name(name: str, default_sr: float) -> float:
     m = re.search(r'(\d+\.?\d*)\s*mV/s', name, re.IGNORECASE)
     if m: return float(m.group(1))
@@ -153,7 +165,9 @@ def fit_uor_eis(f, zr, zi):
 
 def extract_limits_from_data(df: pd.DataFrame, technique: str) -> Tuple[float, float, float]:
     if len(df) == 0: return None, None, None
-    Ecol = "Vf" if "Vf" in df.columns else ("Vu" if "Vu" in df.columns else df.columns[0])
+    Ecol = "Vf" if "Vf" in df.columns else ("Vu" if "Vu" in df.columns else (df.columns[0] if len(df.columns)>0 else None))
+    if Ecol is None or Ecol not in df.columns: return None, None, None
+    
     v_data = df[Ecol].dropna().values
     if len(v_data) == 0: return None, None, None
         
@@ -177,6 +191,78 @@ def extract_limits_from_data(df: pd.DataFrame, technique: str) -> Tuple[float, f
             vlim1 = round(float(v_data[idx_max_dist]), 3)
             vlim2 = round(float(v_data[-1]), 3)
     return vinit, vlim1, vlim2
+
+def recommend_operating_ranges_for_curve(df_curve, baseline_E_window=0.20, smooth_window=151, smooth_poly=3, local_window=101, threshold_mode="percentile", nr_fixed=1.30, nr_percentile=95, min_run_points=60, I_tol=0.0):
+    if "x" not in df_curve.columns or "y" not in df_curve.columns:
+        return {"N_points": 0, "noisy_intervals_E": [], "E_cut_cathodic_V": None, "recommended_noise_safe_V": None, "recommended_reduction_only_V": None}
+    
+    df = df_curve[["x", "y"]].copy()
+    df.columns = ["E", "I"]
+    df = df.replace([np.inf, -np.inf], np.nan).dropna().reset_index(drop=True)
+    dfE = df.sort_values("E").reset_index(drop=True)
+    E, I = dfE["E"].values, dfE["I"].values
+    N = len(dfE)
+
+    if N < 15: return {"N_points": N, "noisy_intervals_E": [], "E_cut_cathodic_V": None, "recommended_noise_safe_V": (float(np.min(E)), float(np.max(E))), "recommended_reduction_only_V": None}
+
+    def odd_cap(n):
+        n = n if n % 2 == 1 else n + 1
+        return max(11, min(n, N if (N % 2 == 1) else N - 1))
+
+    smooth_window = odd_cap(smooth_window)
+    local_window = odd_cap(local_window)
+    smooth_poly = min(smooth_poly, smooth_window - 2)
+
+    Is = savgol_filter(I, window_length=smooth_window, polyorder=smooth_poly)
+    resid = I - Is
+
+    Emax = float(np.max(E))
+    base_mask = (E >= (Emax - baseline_E_window)) & (E <= Emax)
+    base_resid = resid[base_mask] if base_mask.sum() >= 10 else resid[np.argsort(E)[-max(10, int(0.10 * N)):]]
+    sigma_base = mad_sigma(base_resid)
+    if not np.isfinite(sigma_base) or sigma_base == 0: sigma_base = float(np.std(resid)) if np.std(resid) > 0 else 1e-12
+
+    half = local_window // 2
+    NR = np.empty(N, dtype=float)
+    for i in range(N):
+        lo, hi = max(0, i - half), min(N, i + half + 1)
+        sigma_loc = mad_sigma(resid[lo:hi])
+        NR[i] = sigma_loc / sigma_base if np.isfinite(sigma_loc) and sigma_base > 0 else np.nan
+
+    NR_finite = NR[np.isfinite(NR)]
+    thr = float(nr_fixed) if threshold_mode == "fixed" else float(np.percentile(NR_finite, nr_percentile))
+    bad = np.isfinite(NR) & (NR >= thr)
+
+    min_run_eff, noisy_intervals, i = min(min_run_points, max(10, N // 6)), [], 0
+    while i < N:
+        if bad[i]:
+            j = i
+            while j < N and bad[j]: j += 1
+            if (j - i) >= min_run_eff: noisy_intervals.append((float(E[i]), float(E[j - 1])))
+            i = j
+        else: i += 1
+
+    idx_desc = np.argsort(E)[::-1]
+    bad_desc, E_desc = bad[idx_desc], E[idx_desc]
+    E_cut, k = None, 0
+    while k < N:
+        if bad_desc[k]:
+            m = k
+            while m < N and bad_desc[m]: m += 1
+            if (m - k) >= min_run_eff:
+                E_cut = float(E_desc[k])
+                break
+            k = m
+        else: k += 1
+
+    noise_safe = (float(np.min(E)), Emax) if E_cut is None else (E_cut, Emax)
+    df_safe = df[(df["E"] >= noise_safe[0]) & (df["E"] <= noise_safe[1])].dropna()
+    red_range = None
+    if not df_safe.empty:
+        mask_red = df_safe["I"].values <= I_tol
+        if np.any(mask_red): red_range = (float(np.min(df_safe["E"].values[mask_red])), float(np.max(df_safe["E"].values[mask_red])))
+
+    return {"N_points": N, "noisy_intervals_E": noisy_intervals, "E_cut_cathodic_V": E_cut, "recommended_noise_safe_V": noise_safe, "recommended_reduction_only_V": red_range}
 
 def extract_lsv_catalytic_parameters(df_curve: pd.DataFrame, area_cm2: float, e_rev: float) -> Tuple[dict, dict]:
     if "x" not in df_curve.columns or "y" not in df_curve.columns: return {}, {}
@@ -250,6 +336,145 @@ def apply_scientific_style(fig, is_scientific, lx, ly, lxa, lya):
 # ============================================================
 # PARSERS
 # ============================================================
+def parse_gamry_dta_multi_curve(raw: str) -> Tuple[Dict[str, str], List[Tuple[str, pd.DataFrame]]]:
+    lines = raw.splitlines()
+    meta: Dict[str, str] = {}
+    first_curve_idx = None
+    
+    for i, line in enumerate(lines):
+        if re.match(r"^\s*CURVE\d*\s+TABLE\b", line, flags=re.IGNORECASE) or line.strip().upper().startswith("CURVE"):
+            first_curve_idx = i; break
+        if "\t" in line:
+            parts = line.split("\t")
+            if parts[0].strip():
+                val = parts[2].strip() if len(parts) >= 3 else (parts[1].strip() if len(parts) >= 2 else "")
+                if val: meta[parts[0].strip()] = val
+        else:
+            m = re.match(r"^\s*([A-Za-z0-9_]+)\s*:\s*(.+?)\s*$", line)
+            if m: meta[m.group(1).strip()] = m.group(2).strip()
+
+    if first_curve_idx is None: return meta, []
+
+    curves: List[Tuple[str, pd.DataFrame]] = []
+    i = first_curve_idx
+    while i < len(lines):
+        line = lines[i]
+        m = re.match(r"^\s*CURVE(\d*)\s+TABLE\b(?:\s+(\d+))?", line, flags=re.IGNORECASE)
+        if not m:
+            i += 1; continue
+        curve_id = f"Curve {m.group(1) if m.group(1) else '1'}" 
+
+        j, col_line_idx = i + 1, None
+        while j < len(lines) and j < i + 60:
+            s = lines[j].strip()
+            if ("Pt" in s and "Im" in s and ("Vf" in s or "Vu" in s)):
+                col_line_idx = j; break
+            j += 1
+
+        if col_line_idx is None: raise ValueError(f"No pude ubicar encabezado de columnas para {curve_id}.")
+        cols = [c.strip() for c in lines[col_line_idx].split("\t") if c.strip()]
+        if len(cols) < 3: cols = [c.strip() for c in re.split(r"\s{2,}", lines[col_line_idx].strip()) if c.strip()]
+
+        data_start = col_line_idx + 1
+        if data_start < len(lines) and lines[data_start].lstrip().startswith("#"): data_start += 1
+
+        rows: List[List[str]] = []
+        k = data_start
+        while k < len(lines):
+            s = lines[k].strip()
+            if not s:
+                k += 1; continue
+            if re.match(r"^\s*CURVE\d*\s+TABLE\b", s, flags=re.IGNORECASE): break
+            parts = [p.strip() for p in lines[k].split("\t")]
+            if len(parts) == 1: parts = [p.strip() for p in re.split(r"\s{2,}", s)]
+            if parts and parts[0] == "": parts = parts[1:]
+            if len(parts) >= len(cols): rows.append(parts[:len(cols)])
+            k += 1
+
+        df = pd.DataFrame(rows, columns=cols)
+        for c in df.columns:
+            df[c] = pd.to_numeric(df[c].astype(str).str.replace(",", ".", regex=False).str.strip(), errors="coerce")
+        df = df.replace([np.inf, -np.inf], np.nan).dropna(how="all").reset_index(drop=True)
+        curves.append((curve_id, df))
+        i = k
+    return meta, curves
+
+def parse_biologic_mpt(raw: str):
+    lines = raw.splitlines()
+    meta, header_lines = {}, 0
+    for line in lines:
+        if "Nb header lines" in line:
+            try: header_lines = int(line.split(":")[-1].strip())
+            except: header_lines = 0
+            break
+
+    for i in range(min(header_lines, len(lines))):
+        line = lines[i].strip()
+        if not line: continue
+        if ":" in line:
+            k, v = line.split(":", 1)
+            meta[k.strip()] = v.strip()
+        else:
+            parts = re.split(r'\s{2,}|\t+', line)
+            if len(parts) >= 2: meta[parts[0].strip()] = parts[1].strip()
+
+    data_lines = [line for line in lines[header_lines:] if line.strip()]
+    if not data_lines: return meta, []
+
+    line_minus_1 = [c for c in [c.strip() for c in lines[header_lines - 1].split('\t')] if c] if header_lines >= 1 else []
+    line_minus_2 = [c for c in [c.strip() for c in lines[header_lines - 2].split('\t')] if c] if header_lines >= 2 else []
+
+    num_cols = len([c.strip() for c in data_lines[0].split('\t') if c.strip()])
+    if len(line_minus_1) == num_cols: cols = line_minus_1
+    elif len(line_minus_2) + len(line_minus_1) == num_cols: cols = line_minus_2 + line_minus_1
+    else:
+        cols = [f"Col_{i}" for i in range(num_cols)]
+        for col_list in [line_minus_2, line_minus_1]:
+            for c in col_list:
+                cl = c.lower()
+                if "ewe" in cl or "potential" in cl:
+                    if len(cols) > 2: cols[2] = c
+                if "<i>" in cl or "current" in cl:
+                    if len(cols) > 3: cols[3] = c
+
+    rows = []
+    for line in data_lines:
+        parts = [p.strip() for p in line.split("\t") if p.strip()]
+        if len(parts) >= num_cols: rows.append(parts[:num_cols])
+        elif len(parts) > 0: rows.append(parts + [np.nan] * (num_cols - len(parts)))
+
+    unique_cols, seen = [], set()
+    for c in cols:
+        new_c, counter = c, 1
+        while new_c in seen:
+            new_c = f"{c}_{counter}"
+            counter += 1
+        unique_cols.append(new_c)
+        seen.add(new_c)
+
+    df = pd.DataFrame(rows, columns=unique_cols)
+    for c in df.columns:
+        df[c] = pd.to_numeric(df[c].astype(str).str.replace(",", ".", regex=False), errors="coerce")
+    df = df.replace([np.inf, -np.inf], np.nan).dropna(how="all").reset_index(drop=True)
+
+    col_map = {}
+    for c in df.columns:
+        cl = c.lower()
+        if "ewe" in cl or "potential" in cl or "voltage" in cl: col_map[c] = "Vf"
+        elif "<i>" in cl or "current" in cl or "i/ma" in cl: col_map[c] = "Im"
+        elif cl == "cycle number" or cl == "cycle": col_map[c] = "Cycle"
+    df = df.rename(columns=col_map)
+    if "Vf" not in df.columns or "Im" not in df.columns: return meta, []
+    if df["Im"].abs().max() > 1: df["Im"] = df["Im"] / 1000
+
+    curves = []
+    if "Cycle" in df.columns:
+        for cyc in sorted(df["Cycle"].dropna().unique()):
+            df_cyc = df[df["Cycle"] == cyc].copy()
+            if len(df_cyc) > 0: curves.append((f"Cycle {int(cyc) if float(cyc).is_integer() else cyc}", df_cyc.reset_index(drop=True)))
+    else: curves.append(("Curve 1", df))
+    return meta, curves
+
 def parse_pstrace_csv(raw: bytes) -> Tuple[Dict[str, str], List[Tuple[str, pd.DataFrame]]]:
     text = None
     for enc in ['utf-8', 'utf-16', 'latin1']:
@@ -341,21 +566,27 @@ def parse_pstrace_csv(raw: bytes) -> Tuple[Dict[str, str], List[Tuple[str, pd.Da
         curves.append((name, df_scan))
     return meta, curves
 
-def parse_gamry_dta_multi_curve(raw: str): return {}, [] # Simplified for space, keep your original if needed
-def parse_biologic_mpt(raw: str): return {}, []
-
 def convert_df_to_excel(curves_list: List[Tuple[str, pd.DataFrame]]) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         seen_names = set()
         for cid, df in curves_list:
-            safe_name = re.sub(r'[\\*?:/\[\]]', '_', cid)[:31].strip() or "Sheet"
-            original_safe_name, counter = safe_name, 1
-            while safe_name in seen_names:
-                safe_name = f"{original_safe_name[:31-len(str(counter))-1]}_{counter}"
-                counter += 1
-            seen_names.add(safe_name)
-            df.to_excel(writer, index=False, sheet_name=safe_name)
+            if "Z_real" in df.columns and "neg_Z_imag" in df.columns:
+                clean_df = df.replace([np.inf, -np.inf], np.nan).dropna(subset=["Z_real", "neg_Z_imag"])
+            else:
+                Ecol = "Vf" if "Vf" in df.columns else ("Vu" if "Vu" in df.columns else None)
+                if Ecol is None or "Im" not in df.columns: continue
+                clean_df = df.replace([np.inf, -np.inf], np.nan).dropna(subset=[Ecol, "Im"])
+            
+            if len(clean_df) >= 5:
+                safe_name = re.sub(r'[\\*?:/\[\]]', '_', cid)[:31].strip() or "Sheet"
+                original_safe_name, counter = safe_name, 1
+                while safe_name in seen_names:
+                    suffix = f"_{counter}"
+                    safe_name = f"{original_safe_name[:31-len(suffix)]}{suffix}"
+                    counter += 1
+                seen_names.add(safe_name)
+                clean_df.to_excel(writer, index=False, sheet_name=safe_name)
     return output.getvalue()
 
 # ============================================================
@@ -470,7 +701,6 @@ if uploaded_files:
             if fname not in file_dict: continue
             raw_bytes = file_dict[fname].getvalue()
             
-            # Universal parsing dispatch
             meta_sg, curves_comp = parse_pstrace_csv(raw_bytes)
             if not curves_comp:
                 try:
@@ -535,7 +765,6 @@ if uploaded_files:
                 is_sg_eis = any(prepared_group_data[g]["is_eis"] for g in selected_groups if g in prepared_group_data)
                 is_sg_lsv = any(prepared_group_data[g]["is_lsv"] for g in selected_groups if g in prepared_group_data)
                 
-                # --- OPTIONS ---
                 avg_mode = st.radio("Super Group Mode:", ["Plot Individual Files", "Average ALL Files inside each Group"], key=f"sg_avg_{sg}", horizontal=True)
                 
                 if is_sg_eis: fit_eis_model_toggle = st.toggle("🔋 Perform EIS Equivalent Circuit Fitting: Rs-(CPE||(Rct+(RL||L)))", value=False, key=f"fit_eis_{sg}")
@@ -565,7 +794,6 @@ if uploaded_files:
                         if is_sg_eis:
                             common_f, zr_mean, zi_mean, zr_std, zi_std = get_averaged_eis_curve([(tr["name"], tr["df"]) for tr in g_data["traces"]])
                             df_mean = pd.DataFrame({"x": zr_mean, "y": zi_mean, "f": common_f})
-                            # Standard deviation for complex plane is tricky, using None to keep plot clean
                             traces_to_plot = [{"x": zr_mean, "y": zi_mean, "f": common_f, "std": None, "name": sg_custom_labels[g_name], "df": df_mean, "tech": "EIS"}]
                         else:
                             E_mean, I_mean, I_std = get_averaged_curve([(tr["name"], tr["df"]) for tr in g_data["traces"]])
@@ -584,12 +812,11 @@ if uploaded_files:
                         c_color = base_color
                         
                         if is_sg_eis:
-                            # --- EIS PLOTTING & FITTING ---
                             zr, zi, f_hz = tr["x"], tr["y"], tr["f"]
                             fig_super.add_trace(go.Scatter(x=zr, y=zi, mode='markers', name=tr["name"], marker=dict(color=c_color, size=6)))
                             
                             z_mod = np.sqrt(zr**2 + zi**2)
-                            phase = np.degrees(np.arctan2(zi, zr)) # Phase angle (positive)
+                            phase = np.degrees(np.arctan2(zi, zr)) 
                             
                             fig_bode_mod.add_trace(go.Scatter(x=f_hz, y=z_mod, mode='markers', name=tr["name"], marker=dict(color=c_color, size=6)))
                             fig_bode_phase.add_trace(go.Scatter(x=f_hz, y=phase, mode='markers', name=tr["name"], marker=dict(color=c_color, size=6)))
@@ -604,7 +831,6 @@ if uploaded_files:
                                     fig_bode_mod.add_trace(go.Scatter(x=f_hz, y=z_mod_fit, mode='lines', line=dict(color=c_color, width=2, dash='dash'), showlegend=False))
                                     fig_bode_phase.add_trace(go.Scatter(x=f_hz, y=phase_fit, mode='lines', line=dict(color=c_color, width=2, dash='dash'), showlegend=False))
                         else:
-                            # --- CV / LSV PLOTTING & KINETICS ---
                             if not is_sg_lsv and tr.get("sr") and tr["sr"] > 0:
                                 x_anodic = tr["x"][:np.argmax(tr["x"])+1] if np.argmax(tr["x"]) > 0 else tr["x"]
                                 y_anodic = tr["y"][:np.argmax(tr["x"])+1] if np.argmax(tr["x"]) > 0 else tr["y"]
@@ -657,7 +883,6 @@ if uploaded_files:
                                         fig_super_jeta.add_trace(go.Scatter(x=fit_data["eta_mV"], y=j_dens-j_std, mode='lines', line=dict(width=0), fill='tonexty', fillcolor=to_rgba(c_color, 0.2), showlegend=False, hoverinfo='skip'))
                                     fig_super_jeta.add_trace(go.Scatter(x=fit_data["eta_mV"], y=fit_data["j_dens"], mode='lines', name=tr["name"], line=dict(color=c_color, width=2.5)))
 
-                # --- RENDER EIS ---
                 if is_sg_eis:
                     fig_super.update_layout(title="Nyquist Plot", xaxis_title="Z' (Ω)", yaxis_title="-Z'' (Ω)", height=500)
                     fig_super.update_yaxes(scaleanchor="x", scaleratio=1)
@@ -677,8 +902,6 @@ if uploaded_files:
                     if fit_eis_model_toggle and sg_eis_params:
                         st.markdown("#### ⚡ Equivalent Circuit Fit Results `[Rs-(CPE||(Rct+(RL||L)))]`")
                         st.dataframe(pd.DataFrame(sg_eis_params).style.format({"Rs (Ω)": "{:.2f}", "CPE-T (F s^(n-1))": "{:.2e}", "CPE-P (n)": "{:.3f}", "Rct (Ω)": "{:.2f}", "RL (Ω)": "{:.2f}", "L (H)": "{:.2e}", "R²": "{:.4f}", "χ²": "{:.2e}"}), use_container_width=True)
-
-                # --- RENDER CV/LSV ---
                 else:
                     fig_super.update_layout(title="", xaxis_title=x_axis_label, yaxis_title=i_axis_label, height=500)
                     fig_super = apply_scientific_style(fig_super, scientific_style, lx, ly, lxa, lya)
@@ -714,3 +937,160 @@ if uploaded_files:
                             st.metric("b-value (Slope ± SE)", f"{slope:.4f} ± {std_err:.4f}", f"R² = {r_value**2:.4f}", delta_color="off")
                             st.info("💡 **b = 0.5**: Diffusion-controlled process. **b = 1.0**: Surface-controlled (capacitive) process.")
                             st.dataframe(df_cv[["Curve", "v (mV/s)", "E_p (V)", "j_p (mA/cm²)"]].style.format({"v (mV/s)": "{:.1f}", "E_p (V)": "{:.3f}", "j_p (mA/cm²)": "{:.4f}"}), use_container_width=True)
+
+    # --- BOTTOM AREA: INDIVIDUAL ANALYSIS ---
+    st.markdown("---")
+    st.header("📄 Individual Analysis")
+
+    actual_file_order = [item.replace("⋮⋮ ", "") for group in st.session_state.file_groups for item in group["items"]]
+
+    for file_name in actual_file_order:
+        if file_name not in file_dict: continue 
+            
+        file = file_dict[file_name]
+        raw_bytes = file.getvalue()
+        
+        meta, curves = parse_pstrace_csv(raw_bytes)
+        if not curves:
+            try:
+                raw_str = raw_bytes.decode('utf-8')
+                if instrument.startswith("Gamry"): meta, curves = parse_gamry_dta_multi_curve(raw_str)
+                else: meta, curves = parse_biologic_mpt(raw_str)
+            except: pass
+            
+        technique = meta.get("TECHNIQUE", "Unknown Technique")
+        sr = manual_scan_rate if manual_scan_rate > 0.0 else _to_float(meta.get("SCANRATE", meta.get("dE/dt")))
+
+        if not curves: st.error(f"❌ Could not parse {file.name}. Check format."); continue
+
+        vinit, vlim1, vlim2 = None, None, None
+        is_eis = "EIS" in technique
+        if not is_eis:
+            vinit, vlim1, vlim2 = extract_limits_from_data(curves[0][1], technique)
+
+        st.markdown(f"### {file.name}")
+        col_title, col_btn = st.columns([4, 1])
+        with col_title: st.markdown(f"🔬 **Technique Detected:** `{technique}`")
+        with col_btn: st.download_button("📥 Export to Excel", convert_df_to_excel(curves), f"{file.name.split('.')[0]}_Data.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"dl_{file.name}")
+        
+        if is_eis:
+            st.info("💡 **Electrochemical Impedance Spectroscopy (EIS) Data:** Generating Nyquist Plot (-Z'' vs Z')")
+        else:
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Initial Potential", f"{vinit} V" if vinit is not None else "N/A")
+            if "LSV" in technique:
+                c2.metric("Final Potential", f"{vlim1} V" if vlim1 is not None else "N/A")
+                c3.metric("Scan Limit 2", "N/A")
+            else:
+                c2.metric("Scan Limit 1", f"{vlim1} V" if vlim1 is not None else "N/A")
+                c3.metric("Scan Limit 2", f"{vlim2} V" if vlim2 is not None else "N/A")
+            c4.metric("Scan Rate", f"{sr} mV/s" if sr is not None else "N/A")
+
+        processed_curves = []
+        for i, (cid, dfi) in enumerate(curves):
+            if is_eis:
+                if "Z_real" in dfi.columns and "neg_Z_imag" in dfi.columns:
+                    dd = dfi[["Z_real", "neg_Z_imag", "Frequency"]].replace([np.inf, -np.inf], np.nan).dropna().copy()
+                    dd.columns = ["x", "y", "f"]
+                    if len(dd) >= 5: processed_curves.append((cid, dd))
+            else:
+                Ecol = "Vf" if "Vf" in dfi.columns else ("Vu" if "Vu" in dfi.columns else None)
+                if Ecol is None or "Im" not in dfi.columns: continue
+                dd = dfi[[Ecol, "Im"]].replace([np.inf, -np.inf], np.nan).dropna().copy()
+                if apply_ir: dd[Ecol] = dd[Ecol] - dd["Im"] * ru_ohms * (comp_percent / 100.0)
+                if convert_to_rhe: dd[Ecol] = dd[Ecol] + e0_ref + (0.0591 * ph_val)
+                dd.columns = ["x", "y"]
+                if len(dd) >= 10: processed_curves.append((cid, dd))
+
+        if not processed_curves: continue
+
+        fig, fig_tafel, fig_jeta = go.Figure(), go.Figure(), go.Figure()
+        results_list, lsv_cat_list, max_log_I_ind = [], [], -10
+
+        avg_cycles = st.toggle(f"🌟 Average {len(processed_curves)} Cycles/Scans", key=f"avg_{file.name}") if len(processed_curves) > 1 else False
+
+        if avg_cycles:
+            if is_eis:
+                common_f, zr_mean, zi_mean, zr_std, zi_std = get_averaged_eis_curve(processed_curves)
+                mean_color = combined_palette[0]
+                fig.add_trace(go.Scatter(x=zr_mean, y=zi_mean, mode='markers', name='Average', marker=dict(color=mean_color, size=6)))
+            else:
+                E_mean, I_mean, I_std = get_averaged_curve(processed_curves)
+                mean_color = combined_palette[0]
+                
+                if show_sd_shadow:
+                    fig.add_trace(go.Scatter(x=E_mean, y=I_mean + I_std, mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
+                    fig.add_trace(go.Scatter(x=E_mean, y=I_mean - I_std, mode='lines', line=dict(width=0), fill='tonexty', fillcolor=to_rgba(mean_color, 0.2), showlegend=False, hoverinfo='skip'))
+                fig.add_trace(go.Scatter(x=E_mean, y=I_mean, mode='lines', name='Average', line=dict(color=mean_color, width=2.5)))
+                
+                df_mean = pd.DataFrame({"x": E_mean, "y": I_mean})
+                out = recommend_operating_ranges_for_curve(df_mean)
+                ns, ro = out["recommended_noise_safe_V"], out["recommended_reduction_only_V"]
+                results_list.append({"Curve": "Average Curve", "Points": out["N_points"], "Noise-Safe Min (V)": round(ns[0], 4) if ns else None, "Noise-Safe Max (V)": round(ns[1], 4) if ns else None, "Reduction Min (V)": round(ro[0], 4) if ro else None, "Reduction Max (V)": round(ro[1], 4) if ro else None})
+                
+                if "LSV" in technique:
+                    cat_params, fit_data = extract_lsv_catalytic_parameters(df_mean, electrode_area, e_rev)
+                    if cat_params:
+                        cat_params = {"Curve": "Average Curve", **cat_params}
+                        lsv_cat_list.append(cat_params)
+                        max_log_I_ind = max(max_log_I_ind, fit_data["log_I_max"])
+                        fig_tafel.add_trace(go.Scatter(x=fit_data["log_I_full"], y=fit_data["E_full"], mode='lines', name="Average (Log Curve)", line=dict(color=mean_color, width=2.5)))
+                        if not np.isnan(fit_data["slope"]) and len(fit_data["log_I_fit"]) > 0:
+                            min_x, max_x = np.min(fit_data["log_I_fit"]), np.max(fit_data["log_I_fit"])
+                            span = max_x - min_x
+                            fit_x = np.array([min_x - (span*1.5), max_x + (span*1.5)])
+                            fig_tafel.add_trace(go.Scatter(x=fit_x, y=fit_data["slope"]*fit_x + fit_data["intercept"], mode='lines', name=f"Fit: {cat_params['Tafel Slope (mV/dec)']:.1f} mV/dec", line=dict(color=mean_color, width=2, dash='dot')))
+                        
+                        if show_sd_shadow:
+                            j_dens, j_std = (I_mean * 1000) / electrode_area, (I_std * 1000) / electrode_area
+                            fig_jeta.add_trace(go.Scatter(x=fit_data["eta_mV"], y=j_dens+j_std, mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
+                            fig_jeta.add_trace(go.Scatter(x=fit_data["eta_mV"], y=j_dens-j_std, mode='lines', line=dict(width=0), fill='tonexty', fillcolor=to_rgba(mean_color, 0.2), showlegend=False, hoverinfo='skip'))
+                        fig_jeta.add_trace(go.Scatter(x=fit_data["eta_mV"], y=fit_data["j_dens"], mode='lines', name="Average", line=dict(color=mean_color, width=2.5)))
+        else:
+            for i, (cid, dd) in enumerate(processed_curves):
+                line_color = combined_palette[i % len(combined_palette)]
+                if is_eis:
+                    fig.add_trace(go.Scatter(x=dd["x"], y=dd["y"], mode='markers', name=cid, marker=dict(color=line_color, size=6)))
+                else:
+                    fig.add_trace(go.Scatter(x=dd["x"], y=dd["y"], mode='lines', name=cid, line=dict(color=line_color, width=2)))
+                    out = recommend_operating_ranges_for_curve(dd)
+                    ns, ro = out["recommended_noise_safe_V"], out["recommended_reduction_only_V"]
+                    results_list.append({"Curve": cid, "Points": out["N_points"], "Noise-Safe Min (V)": round(ns[0], 4) if ns else None, "Noise-Safe Max (V)": round(ns[1], 4) if ns else None, "Reduction Min (V)": round(ro[0], 4) if ro else None, "Reduction Max (V)": round(ro[1], 4) if ro else None})
+                    
+                    if "LSV" in technique:
+                        cat_params, fit_data = extract_lsv_catalytic_parameters(dd, electrode_area, e_rev)
+                        if cat_params:
+                            cat_params = {"Curve": cid, **cat_params}
+                            lsv_cat_list.append(cat_params)
+                            max_log_I_ind = max(max_log_I_ind, fit_data["log_I_max"])
+                            fig_tafel.add_trace(go.Scatter(x=fit_data["log_I_full"], y=fit_data["E_full"], mode='lines', name=f"{cid}", line=dict(color=line_color, width=2)))
+                            if not np.isnan(fit_data["slope"]) and len(fit_data["log_I_fit"]) > 0:
+                                min_x, max_x = np.min(fit_data["log_I_fit"]), np.max(fit_data["log_I_fit"])
+                                span = max_x - min_x
+                                fit_x = np.array([min_x - (span*1.5), max_x + (span*1.5)])
+                                fig_tafel.add_trace(go.Scatter(x=fit_x, y=fit_data["slope"]*fit_x + fit_data["intercept"], mode='lines', name=f"Fit: {cat_params['Tafel Slope (mV/dec)']:.1f} mV/dec", line=dict(color=line_color, width=2, dash='dot')))
+                            fig_jeta.add_trace(go.Scatter(x=fit_data["eta_mV"], y=fit_data["j_dens"], mode='lines', name=cid, line=dict(color=line_color, width=2)))
+
+        x_title = "Z' (Ω)" if is_eis else x_axis_label
+        y_title = "-Z'' (Ω)" if is_eis else i_axis_label
+        fig.update_layout(title="Nyquist Plot" if is_eis else "Raw Data" if not scientific_style else "", xaxis_title=x_title, yaxis_title=y_title, height=500)
+        
+        if is_eis: fig.update_yaxes(scaleanchor="x", scaleratio=1)
+            
+        fig = apply_scientific_style(fig, scientific_style, lx, ly, lxa, lya)
+        st.plotly_chart(fig, use_container_width=True, config=dl_config)
+        
+        if "LSV" in technique and lsv_cat_list and not is_eis:
+            c1, c2 = st.columns(2)
+            with c1:
+                fig_jeta.update_layout(title="Catalytic Performance" if not scientific_style else "", xaxis_title="Overpotential η (mV)", yaxis_title=j_axis_label, height=500)
+                fig_jeta = apply_scientific_style(fig_jeta, scientific_style, lx, ly, lxa, lya)
+                st.plotly_chart(fig_jeta, use_container_width=True, config=dl_config)
+            with c2:
+                fig_tafel.update_layout(title="Tafel Plot" if not scientific_style else "", xaxis_title="log₁₀|I| (A)", yaxis_title=x_axis_label, xaxis=dict(range=[max_log_I_ind - 4.5, max_log_I_ind + 0.2]), height=500)
+                fig_tafel = apply_scientific_style(fig_tafel, scientific_style, lx, ly, lxa, lya)
+                st.plotly_chart(fig_tafel, use_container_width=True, config=dl_config)
+        
+        if results_list and not is_eis: st.write("**Recommended Operating Ranges:**"); st.dataframe(pd.DataFrame(results_list), use_container_width=True)
+        if lsv_cat_list and not is_eis: st.write("**🧪 Catalytic Parameters:**"); st.dataframe(pd.DataFrame(lsv_cat_list), use_container_width=True)
+        st.markdown("<br><br>", unsafe_allow_html=True)
