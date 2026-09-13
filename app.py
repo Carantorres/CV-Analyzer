@@ -260,7 +260,6 @@ def extract_lsv_catalytic_parameters(df_curve: pd.DataFrame, area_cm2: float, e_
     return params, fit_data
 
 def apply_scientific_style(fig, is_scientific, lx, ly, lxa, lya):
-    """Aplica el estilo editorial y posiciona la leyenda de forma personalizada."""
     if is_scientific:
         fig.update_layout(
             title="", 
@@ -639,6 +638,9 @@ if uploaded_files:
                             
         st.session_state.file_groups = sort_items(st.session_state.file_groups, multi_containers=True)
 
+    # --- DICTIONARY TO STORE PROCESSED DATA FOR SUPER GROUPS ---
+    prepared_group_data = {}
+
     # --- TOP AREA: GROUPED COMPARISONS ---
     has_groups_plotted = False
     valid_groups_for_super = []
@@ -691,103 +693,234 @@ if uploaded_files:
             if processed_curves:
                 group_data_parsed.append({"fname": fname, "tech": tech_sg, "sr": sr, "curves": processed_curves})
 
-        avg_group_files = False
         custom_labels = {}
         if len(group_data_parsed) > 0:
-            avg_group_files = st.toggle(f"🌟 Plot Averaged Scans per File", key=f"avg_g_{g_idx}", help="Combine multiple cycles into a single average line per file.")
-            if avg_group_files:
+            avg_mode = st.radio(
+                "Averaging Mode:", 
+                ["None (Plot all)", "Average Scans per File", "Average ALL Files into One Curve"], 
+                key=f"mode_{g_idx}", horizontal=True
+            )
+            
+            if avg_mode == "Average Scans per File":
                 st.markdown("**Customize Legend Labels:**")
                 cols = st.columns(3)
                 for i, dat in enumerate(group_data_parsed):
                     def_val = f"{dat['sr']} mV/s" if dat['sr'] else dat['fname']
                     custom_labels[dat['fname']] = cols[i%3].text_input(f"Label for {dat['fname']}", value=def_val, key=f"lbl_g_{g_idx}_{dat['fname']}")
+            elif avg_mode == "Average ALL Files into One Curve":
+                custom_labels["ALL"] = st.text_input("Legend Label for Averaged Group:", value=group['header'], key=f"lbl_all_{g_idx}")
 
         fig_comp, fig_tafel_comp, fig_jeta_comp = go.Figure(), go.Figure(), go.Figure()
         trace_idx, group_lsv_params, max_log_I_global = 0, [], -10 
+        group_plot_data = []
         
-        for dat in group_data_parsed:
-            fname, tech = dat["fname"], dat["tech"]
-            
-            if avg_group_files:
-                c_color = combined_palette[trace_idx % len(combined_palette)]
-                E_mean, I_mean, I_std = get_averaged_curve(dat["curves"])
-                df_mean = pd.DataFrame({"Vf": E_mean, "Im": I_mean})
-                trace_name = custom_labels[fname]
+        if len(group_data_parsed) > 0:
+            if avg_mode == "Average ALL Files into One Curve":
+                all_curves = []
+                for dat in group_data_parsed:
+                    all_curves.extend(dat["curves"])
                 
-                if show_sd_shadow:
-                    fig_comp.add_trace(go.Scatter(x=E_mean, y=I_mean+I_std, mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
-                    fig_comp.add_trace(go.Scatter(x=E_mean, y=I_mean-I_std, mode='lines', line=dict(width=0), fill='tonexty', fillcolor=to_rgba(c_color, 0.2), showlegend=False, hoverinfo='skip'))
-                fig_comp.add_trace(go.Scatter(x=E_mean, y=I_mean, mode='lines', name=trace_name, line=dict(color=c_color, width=2.5)))
-                
-                if "LSV" in tech:
-                    cat_params, fit_data = extract_lsv_catalytic_parameters(df_mean, electrode_area, e_rev)
-                    if cat_params:
-                        cat_params = {"File": trace_name, "Curve": "Average", **cat_params}
-                        group_lsv_params.append(cat_params)
-                        max_log_I_global = max(max_log_I_global, fit_data["log_I_max"])
-                        fig_tafel_comp.add_trace(go.Scatter(x=fit_data["log_I_full"], y=fit_data["E_full"], mode='lines', name=trace_name, line=dict(color=c_color, width=2.5)))
-                        if not np.isnan(fit_data["slope"]) and len(fit_data["log_I_fit"]) > 0:
-                            min_x, max_x = np.min(fit_data["log_I_fit"]), np.max(fit_data["log_I_fit"])
-                            span = max_x - min_x
-                            fit_x = np.array([min_x - (span*1.5), max_x + (span*1.5)])
-                            fig_tafel_comp.add_trace(go.Scatter(x=fit_x, y=fit_data["slope"]*fit_x + fit_data["intercept"], mode='lines', name=f"Fit: {cat_params['Tafel Slope (mV/dec)']:.1f} mV/dec", line=dict(color=c_color, width=2, dash='dot')))
-                        
-                        if show_sd_shadow:
-                            j_dens = (I_mean * 1000) / electrode_area
-                            j_std = (I_std * 1000) / electrode_area
-                            fig_jeta_comp.add_trace(go.Scatter(x=fit_data["eta_mV"], y=j_dens+j_std, mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
-                            fig_jeta_comp.add_trace(go.Scatter(x=fit_data["eta_mV"], y=j_dens-j_std, mode='lines', line=dict(width=0), fill='tonexty', fillcolor=to_rgba(c_color, 0.2), showlegend=False, hoverinfo='skip'))
-                        fig_jeta_comp.add_trace(go.Scatter(x=fit_data["eta_mV"], y=fit_data["j_dens"], mode='lines', name=trace_name, line=dict(color=c_color, width=2.5)))
-                trace_idx += 1
-                
-            else:
-                for cid, dd_comp, Ecol in dat["curves"]:
-                    c_color = combined_palette[trace_idx % len(combined_palette)]
-                    trace_name = f"{fname}" if len(dat['curves']) == 1 else f"{fname} ({cid})"
-                    fig_comp.add_trace(go.Scatter(x=dd_comp[Ecol], y=dd_comp["Im"], mode='lines', name=trace_name, line=dict(color=c_color, width=2)))
-                    if "LSV" in tech:
-                        cat_params, fit_data = extract_lsv_catalytic_parameters(dd_comp, electrode_area, e_rev)
+                if all_curves:
+                    c_color = combined_palette[0]
+                    E_mean, I_mean, I_std = get_averaged_curve(all_curves)
+                    df_mean = pd.DataFrame({"Vf": E_mean, "Im": I_mean})
+                    trace_name = custom_labels["ALL"]
+                    
+                    group_plot_data.append({"x": E_mean, "y": I_mean, "std": I_std, "name": trace_name, "df": df_mean, "tech": "LSV" if is_group_lsv else "CV"})
+                    
+                    if show_sd_shadow:
+                        fig_comp.add_trace(go.Scatter(x=E_mean, y=I_mean+I_std, mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
+                        fig_comp.add_trace(go.Scatter(x=E_mean, y=I_mean-I_std, mode='lines', line=dict(width=0), fill='tonexty', fillcolor=to_rgba(c_color, 0.2), showlegend=False, hoverinfo='skip'))
+                    fig_comp.add_trace(go.Scatter(x=E_mean, y=I_mean, mode='lines', name=trace_name, line=dict(color=c_color, width=2.5)))
+                    
+                    if is_group_lsv:
+                        cat_params, fit_data = extract_lsv_catalytic_parameters(df_mean, electrode_area, e_rev)
                         if cat_params:
-                            cat_params = {"File": fname, "Curve": cid, **cat_params}
+                            cat_params = {"File": trace_name, "Curve": "Group Average", **cat_params}
                             group_lsv_params.append(cat_params)
                             max_log_I_global = max(max_log_I_global, fit_data["log_I_max"])
-                            fig_tafel_comp.add_trace(go.Scatter(x=fit_data["log_I_full"], y=fit_data["E_full"], mode='lines', name=trace_name, line=dict(color=c_color, width=2)))
+                            fig_tafel_comp.add_trace(go.Scatter(x=fit_data["log_I_full"], y=fit_data["E_full"], mode='lines', name=trace_name, line=dict(color=c_color, width=2.5)))
                             if not np.isnan(fit_data["slope"]) and len(fit_data["log_I_fit"]) > 0:
                                 min_x, max_x = np.min(fit_data["log_I_fit"]), np.max(fit_data["log_I_fit"])
                                 span = max_x - min_x
                                 fit_x = np.array([min_x - (span*1.5), max_x + (span*1.5)])
                                 fig_tafel_comp.add_trace(go.Scatter(x=fit_x, y=fit_data["slope"]*fit_x + fit_data["intercept"], mode='lines', name=f"Fit: {cat_params['Tafel Slope (mV/dec)']:.1f} mV/dec", line=dict(color=c_color, width=2, dash='dot')))
-                            fig_jeta_comp.add_trace(go.Scatter(x=fit_data["eta_mV"], y=fit_data["j_dens"], mode='lines', name=trace_name, line=dict(color=c_color, width=2)))
-                    trace_idx += 1
-                        
-        fig_comp.update_layout(title="Raw Data" if not scientific_style else "", xaxis_title=x_axis_label, yaxis_title=i_axis_label, height=500)
-        fig_comp = apply_scientific_style(fig_comp, scientific_style, lx, ly, lxa, lya)
-        st.plotly_chart(fig_comp, use_container_width=True, config=dl_config)
-        
-        if is_group_lsv:
-            c1, c2 = st.columns(2)
-            with c1:
-                fig_jeta_comp.update_layout(title="Catalytic Performance" if not scientific_style else "", xaxis_title="Overpotential η (mV)", yaxis_title=j_axis_label, height=500)
-                fig_jeta_comp = apply_scientific_style(fig_jeta_comp, scientific_style, lx, ly, lxa, lya)
-                st.plotly_chart(fig_jeta_comp, use_container_width=True, config=dl_config)
-            with c2:
-                fig_tafel_comp.update_layout(title="Tafel Plot" if not scientific_style else "", xaxis_title="log₁₀|I| (A)", yaxis_title=x_axis_label, xaxis=dict(range=[max_log_I_global - 4.5, max_log_I_global + 0.2]), height=500)
-                fig_tafel_comp = apply_scientific_style(fig_tafel_comp, scientific_style, lx, ly, lxa, lya)
-                st.plotly_chart(fig_tafel_comp, use_container_width=True, config=dl_config)
-        
-        if group_lsv_params:
-            st.markdown("#### 🧪 Group Catalytic Statistics (LSV)")
-            df_cat = pd.DataFrame(group_lsv_params)
-            summary = []
-            cols_to_summarize = ["j_max (mA/cm²)", "E_onset (V)", "Tafel Slope (mV/dec)", "Tafel R²"] + [c for c in df_cat.columns if c.startswith("η_")]
-            for col in cols_to_summarize:
-                if col in df_cat.columns:
-                    mean_v, std_v, n_v = df_cat[col].mean(), df_cat[col].std(), df_cat[col].notna().sum()
-                    rsd_v = (std_v / abs(mean_v) * 100) if (pd.notna(mean_v) and mean_v != 0) else np.nan
-                    summary.append({"Parameter": col, "Mean": round(mean_v, 6) if pd.notna(mean_v) else None, "Std Dev (±)": round(std_v, 6) if pd.notna(std_v) else None, "RSD (%)": round(rsd_v, 2) if pd.notna(rsd_v) else None, "Count (n)": int(n_v)})
-            st.dataframe(pd.DataFrame(summary), use_container_width=True)
-            st.markdown("<br>", unsafe_allow_html=True)
+                            
+                            if show_sd_shadow:
+                                j_dens, j_std = (I_mean * 1000) / electrode_area, (I_std * 1000) / electrode_area
+                                fig_jeta_comp.add_trace(go.Scatter(x=fit_data["eta_mV"], y=j_dens+j_std, mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
+                                fig_jeta_comp.add_trace(go.Scatter(x=fit_data["eta_mV"], y=j_dens-j_std, mode='lines', line=dict(width=0), fill='tonexty', fillcolor=to_rgba(c_color, 0.2), showlegend=False, hoverinfo='skip'))
+                            fig_jeta_comp.add_trace(go.Scatter(x=fit_data["eta_mV"], y=fit_data["j_dens"], mode='lines', name=trace_name, line=dict(color=c_color, width=2.5)))
 
+            elif avg_mode == "Average Scans per File":
+                for dat in group_data_parsed:
+                    c_color = combined_palette[trace_idx % len(combined_palette)]
+                    E_mean, I_mean, I_std = get_averaged_curve(dat["curves"])
+                    df_mean = pd.DataFrame({"Vf": E_mean, "Im": I_mean})
+                    trace_name = custom_labels[dat['fname']]
+                    
+                    group_plot_data.append({"x": E_mean, "y": I_mean, "std": I_std, "name": trace_name, "df": df_mean, "tech": dat["tech"]})
+                    
+                    if show_sd_shadow:
+                        fig_comp.add_trace(go.Scatter(x=E_mean, y=I_mean+I_std, mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
+                        fig_comp.add_trace(go.Scatter(x=E_mean, y=I_mean-I_std, mode='lines', line=dict(width=0), fill='tonexty', fillcolor=to_rgba(c_color, 0.2), showlegend=False, hoverinfo='skip'))
+                    fig_comp.add_trace(go.Scatter(x=E_mean, y=I_mean, mode='lines', name=trace_name, line=dict(color=c_color, width=2.5)))
+                    
+                    if "LSV" in dat["tech"]:
+                        cat_params, fit_data = extract_lsv_catalytic_parameters(df_mean, electrode_area, e_rev)
+                        if cat_params:
+                            cat_params = {"File": trace_name, "Curve": "Average", **cat_params}
+                            group_lsv_params.append(cat_params)
+                            max_log_I_global = max(max_log_I_global, fit_data["log_I_max"])
+                            fig_tafel_comp.add_trace(go.Scatter(x=fit_data["log_I_full"], y=fit_data["E_full"], mode='lines', name=trace_name, line=dict(color=c_color, width=2.5)))
+                            if not np.isnan(fit_data["slope"]) and len(fit_data["log_I_fit"]) > 0:
+                                min_x, max_x = np.min(fit_data["log_I_fit"]), np.max(fit_data["log_I_fit"])
+                                span = max_x - min_x
+                                fit_x = np.array([min_x - (span*1.5), max_x + (span*1.5)])
+                                fig_tafel_comp.add_trace(go.Scatter(x=fit_x, y=fit_data["slope"]*fit_x + fit_data["intercept"], mode='lines', name=f"Fit: {cat_params['Tafel Slope (mV/dec)']:.1f} mV/dec", line=dict(color=c_color, width=2, dash='dot')))
+                            
+                            if show_sd_shadow:
+                                j_dens = (I_mean * 1000) / electrode_area
+                                j_std = (I_std * 1000) / electrode_area
+                                fig_jeta_comp.add_trace(go.Scatter(x=fit_data["eta_mV"], y=j_dens+j_std, mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
+                                fig_jeta_comp.add_trace(go.Scatter(x=fit_data["eta_mV"], y=j_dens-j_std, mode='lines', line=dict(width=0), fill='tonexty', fillcolor=to_rgba(c_color, 0.2), showlegend=False, hoverinfo='skip'))
+                            fig_jeta_comp.add_trace(go.Scatter(x=fit_data["eta_mV"], y=fit_data["j_dens"], mode='lines', name=trace_name, line=dict(color=c_color, width=2.5)))
+                    trace_idx += 1
+            else:
+                for dat in group_data_parsed:
+                    for cid, dd_comp, Ecol in dat["curves"]:
+                        c_color = combined_palette[trace_idx % len(combined_palette)]
+                        trace_name = f"{dat['fname']}" if len(dat['curves']) == 1 else f"{dat['fname']} ({cid})"
+                        
+                        group_plot_data.append({"x": dd_comp[Ecol].values, "y": dd_comp["Im"].values, "std": None, "name": trace_name, "df": dd_comp, "tech": dat["tech"]})
+                        
+                        fig_comp.add_trace(go.Scatter(x=dd_comp[Ecol], y=dd_comp["Im"], mode='lines', name=trace_name, line=dict(color=c_color, width=2)))
+                        if "LSV" in dat["tech"]:
+                            cat_params, fit_data = extract_lsv_catalytic_parameters(dd_comp, electrode_area, e_rev)
+                            if cat_params:
+                                cat_params = {"File": dat['fname'], "Curve": cid, **cat_params}
+                                group_lsv_params.append(cat_params)
+                                max_log_I_global = max(max_log_I_global, fit_data["log_I_max"])
+                                fig_tafel_comp.add_trace(go.Scatter(x=fit_data["log_I_full"], y=fit_data["E_full"], mode='lines', name=trace_name, line=dict(color=c_color, width=2)))
+                                if not np.isnan(fit_data["slope"]) and len(fit_data["log_I_fit"]) > 0:
+                                    min_x, max_x = np.min(fit_data["log_I_fit"]), np.max(fit_data["log_I_fit"])
+                                    span = max_x - min_x
+                                    fit_x = np.array([min_x - (span*1.5), max_x + (span*1.5)])
+                                    fig_tafel_comp.add_trace(go.Scatter(x=fit_x, y=fit_data["slope"]*fit_x + fit_data["intercept"], mode='lines', name=f"Fit: {cat_params['Tafel Slope (mV/dec)']:.1f} mV/dec", line=dict(color=c_color, width=2, dash='dot')))
+                                fig_jeta_comp.add_trace(go.Scatter(x=fit_data["eta_mV"], y=fit_data["j_dens"], mode='lines', name=trace_name, line=dict(color=c_color, width=2)))
+                        trace_idx += 1
+                        
+            prepared_group_data[group['header']] = {"traces": group_plot_data, "is_lsv": is_group_lsv}
+            
+            fig_comp.update_layout(title="", xaxis_title=x_axis_label, yaxis_title=i_axis_label, height=500)
+            fig_comp = apply_scientific_style(fig_comp, scientific_style, lx, ly, lxa, lya)
+            st.plotly_chart(fig_comp, use_container_width=True, config=dl_config)
+            
+            if is_group_lsv:
+                c1, c2 = st.columns(2)
+                with c1:
+                    fig_jeta_comp.update_layout(title="", xaxis_title="Overpotential η (mV)", yaxis_title=j_axis_label, height=500)
+                    fig_jeta_comp = apply_scientific_style(fig_jeta_comp, scientific_style, lx, ly, lxa, lya)
+                    st.plotly_chart(fig_jeta_comp, use_container_width=True, config=dl_config)
+                with c2:
+                    fig_tafel_comp.update_layout(title="", xaxis_title="log₁₀|I| (A)", yaxis_title=x_axis_label, xaxis=dict(range=[max_log_I_global - 4.5, max_log_I_global + 0.2]), height=500)
+                    fig_tafel_comp = apply_scientific_style(fig_tafel_comp, scientific_style, lx, ly, lxa, lya)
+                    st.plotly_chart(fig_tafel_comp, use_container_width=True, config=dl_config)
+            
+            if group_lsv_params:
+                st.markdown("#### 🧪 Group Catalytic Statistics (LSV)")
+                df_cat = pd.DataFrame(group_lsv_params)
+                summary = []
+                cols_to_summarize = ["j_max (mA/cm²)", "E_onset (V)", "Tafel Slope (mV/dec)", "Tafel R²"] + [c for c in df_cat.columns if c.startswith("η_")]
+                for col in cols_to_summarize:
+                    if col in df_cat.columns:
+                        mean_v, std_v, n_v = df_cat[col].mean(), df_cat[col].std(), df_cat[col].notna().sum()
+                        rsd_v = (std_v / abs(mean_v) * 100) if (pd.notna(mean_v) and mean_v != 0) else np.nan
+                        summary.append({"Parameter": col, "Mean": round(mean_v, 6) if pd.notna(mean_v) else None, "Std Dev (±)": round(std_v, 6) if pd.notna(std_v) else None, "RSD (%)": round(rsd_v, 2) if pd.notna(rsd_v) else None, "Count (n)": int(n_v)})
+                st.dataframe(pd.DataFrame(summary), use_container_width=True)
+                st.markdown("<br>", unsafe_allow_html=True)
+
+    # --- ZONA: SUPER GROUPS ---
+    st.markdown("---")
+    st.header("🧬 Super Groups (Combine Groups)")
+    st.markdown("Merge multiple groups into a single master plot. **Ideal for combining averaged 'Species' data.**")
+    
+    if 'num_super_groups' not in st.session_state:
+        st.session_state.num_super_groups = 0
+
+    col_sg1, col_sg2, _ = st.columns([1, 1, 6])
+    with col_sg1:
+        if st.button("➕ Add Super Group"):
+            st.session_state.num_super_groups += 1
+    with col_sg2:
+        if st.session_state.num_super_groups > 0:
+            if st.button("➖ Remove Last"):
+                st.session_state.num_super_groups -= 1
+
+    for sg in range(st.session_state.num_super_groups):
+        with st.expander(f"Super Group {sg+1} Configurations", expanded=True):
+            selected_groups = st.multiselect(
+                "Select groups to merge:", 
+                options=valid_groups_for_super, 
+                key=f"super_group_select_{sg}"
+            )
+            
+            if selected_groups:
+                fig_super = go.Figure()
+                fig_super_tafel = go.Figure()
+                fig_super_jeta = go.Figure()
+                is_sg_lsv = False
+                sg_lsv_params = []
+                sg_max_log_I = -10
+                
+                for g_idx, g_name in enumerate(selected_groups):
+                    if g_name not in prepared_group_data: continue
+                    g_data = prepared_group_data[g_name]
+                    if g_data["is_lsv"]: is_sg_lsv = True
+                    
+                    base_color = combined_palette[g_idx % len(combined_palette)]
+                    
+                    for tr_idx, tr in enumerate(g_data["traces"]):
+                        c_color = base_color
+                        
+                        if tr["std"] is not None and show_sd_shadow:
+                            fig_super.add_trace(go.Scatter(x=tr["x"], y=tr["y"]+tr["std"], mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
+                            fig_super.add_trace(go.Scatter(x=tr["x"], y=tr["y"]-tr["std"], mode='lines', line=dict(width=0), fill='tonexty', fillcolor=to_rgba(c_color, 0.2), showlegend=False, hoverinfo='skip'))
+                        fig_super.add_trace(go.Scatter(x=tr["x"], y=tr["y"], mode='lines', name=tr["name"], line=dict(color=c_color, width=2.5)))
+                        
+                        if "LSV" in tr["tech"]:
+                            cat_params, fit_data = extract_lsv_catalytic_parameters(tr["df"], electrode_area, e_rev)
+                            if cat_params:
+                                sg_lsv_params.append({"Group": g_name, "Curve": tr["name"], **cat_params})
+                                sg_max_log_I = max(sg_max_log_I, fit_data["log_I_max"])
+                                fig_super_tafel.add_trace(go.Scatter(x=fit_data["log_I_full"], y=fit_data["E_full"], mode='lines', name=tr["name"], line=dict(color=c_color, width=2.5)))
+                                if not np.isnan(fit_data["slope"]) and len(fit_data["log_I_fit"]) > 0:
+                                    min_x, max_x = np.min(fit_data["log_I_fit"]), np.max(fit_data["log_I_fit"])
+                                    span = max_x - min_x
+                                    fit_x = np.array([min_x - (span*1.5), max_x + (span*1.5)])
+                                    fig_super_tafel.add_trace(go.Scatter(x=fit_x, y=fit_data["slope"]*fit_x + fit_data["intercept"], mode='lines', name=f"Fit: {cat_params['Tafel Slope (mV/dec)']:.1f} mV/dec", line=dict(color=c_color, width=2, dash='dot')))
+                                
+                                if tr["std"] is not None and show_sd_shadow:
+                                    j_dens = (tr["y"] * 1000) / electrode_area
+                                    j_std = (tr["std"] * 1000) / electrode_area
+                                    fig_super_jeta.add_trace(go.Scatter(x=fit_data["eta_mV"], y=j_dens+j_std, mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
+                                    fig_super_jeta.add_trace(go.Scatter(x=fit_data["eta_mV"], y=j_dens-j_std, mode='lines', line=dict(width=0), fill='tonexty', fillcolor=to_rgba(c_color, 0.2), showlegend=False, hoverinfo='skip'))
+                                fig_super_jeta.add_trace(go.Scatter(x=fit_data["eta_mV"], y=fit_data["j_dens"], mode='lines', name=tr["name"], line=dict(color=c_color, width=2.5)))
+
+                fig_super.update_layout(title="", xaxis_title=x_axis_label, yaxis_title=i_axis_label, height=500)
+                fig_super = apply_scientific_style(fig_super, scientific_style, lx, ly, lxa, lya)
+                st.plotly_chart(fig_super, use_container_width=True, config=dl_config)
+                
+                if is_sg_lsv:
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        fig_super_jeta.update_layout(title="", xaxis_title="Overpotential η (mV)", yaxis_title=j_axis_label, height=500)
+                        fig_super_jeta = apply_scientific_style(fig_super_jeta, scientific_style, lx, ly, lxa, lya)
+                        st.plotly_chart(fig_super_jeta, use_container_width=True, config=dl_config)
+                    with c2:
+                        fig_super_tafel.update_layout(title="", xaxis_title="log₁₀|I| (A)", yaxis_title=x_axis_label, xaxis=dict(range=[sg_max_log_I - 4.5, sg_max_log_I + 0.2]), height=500)
+                        fig_super_tafel = apply_scientific_style(fig_super_tafel, scientific_style, lx, ly, lxa, lya)
+                        st.plotly_chart(fig_super_tafel, use_container_width=True, config=dl_config)
 
     # --- BOTTOM AREA: INDIVIDUAL ANALYSIS ---
     st.markdown("---")
@@ -905,18 +1038,18 @@ if uploaded_files:
                             fig_tafel.add_trace(go.Scatter(x=fit_x, y=fit_data["slope"]*fit_x + fit_data["intercept"], mode='lines', name=f"Fit: {cat_params['Tafel Slope (mV/dec)']:.1f} mV/dec", line=dict(color=line_color, width=2, dash='dot')))
                         fig_jeta.add_trace(go.Scatter(x=fit_data["eta_mV"], y=fit_data["j_dens"], mode='lines', name=cid, line=dict(color=line_color, width=2)))
 
-        fig.update_layout(title="Raw Data" if not scientific_style else "", xaxis_title=x_axis_label, yaxis_title=i_axis_label, height=500)
+        fig.update_layout(title="", xaxis_title=x_axis_label, yaxis_title=i_axis_label, height=500)
         fig = apply_scientific_style(fig, scientific_style, lx, ly, lxa, lya)
         st.plotly_chart(fig, use_container_width=True, config=dl_config)
         
         if "LSV" in technique and lsv_cat_list:
             c1, c2 = st.columns(2)
             with c1:
-                fig_jeta.update_layout(title="Catalytic Performance" if not scientific_style else "", xaxis_title="Overpotential η (mV)", yaxis_title=j_axis_label, height=500)
+                fig_jeta.update_layout(title="", xaxis_title="Overpotential η (mV)", yaxis_title=j_axis_label, height=500)
                 fig_jeta = apply_scientific_style(fig_jeta, scientific_style, lx, ly, lxa, lya)
                 st.plotly_chart(fig_jeta, use_container_width=True, config=dl_config)
             with c2:
-                fig_tafel.update_layout(title="Tafel Plot" if not scientific_style else "", xaxis_title="log₁₀|I| (A)", yaxis_title=x_axis_label, xaxis=dict(range=[max_log_I_ind - 4.5, max_log_I_ind + 0.2]), height=500)
+                fig_tafel.update_layout(title="", xaxis_title="log₁₀|I| (A)", yaxis_title=x_axis_label, xaxis=dict(range=[max_log_I_ind - 4.5, max_log_I_ind + 0.2]), height=500)
                 fig_tafel = apply_scientific_style(fig_tafel, scientific_style, lx, ly, lxa, lya)
                 st.plotly_chart(fig_tafel, use_container_width=True, config=dl_config)
         
