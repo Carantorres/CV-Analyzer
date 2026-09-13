@@ -42,6 +42,11 @@ with st.popover("📖 View Calculation Methods & Algorithms"):
 
     **4. Operating Range Detection**
     *   **Noise-Free Electrodeposition Window:** Uses a **Savitzky-Golay filter** coupled with **Median Absolute Deviation (MAD)** to estimate local signal-to-noise ratios. It automatically discards segments with intense faradaic noise (e.g., massive hydrogen bubbling) to recommend a stable and reliable potential window.
+    
+    **5. Scan Rate Kinetics ($b$-value Analysis)**
+    *   Based on the power-law relationship $i_p = a \\cdot v^b$, the anodic peak current density ($j_{pa}$) is analyzed as a function of the scan rate ($v$).
+    *   The algorithm extracts the absolute maximum anodic current $j_{pa}$ and its potential $E_{pa}$ for each trace.
+    *   A linear regression of $\\log_{10}(j_{pa})$ vs $\\log_{10}(v)$ calculates the slope $b$ and its standard error. A value of $b=0.5$ implies a diffusion-controlled process, while $b=1.0$ indicates a surface-confined (capacitive) process.
     """)
 
 st.markdown("---")
@@ -66,6 +71,11 @@ def to_rgba(color_str: str, alpha: float = 0.2) -> str:
     elif color_str.startswith('rgb('):
         return color_str.replace('rgb(', 'rgba(').replace(')', f', {alpha})')
     return f"rgba(150, 150, 150, {alpha})"
+
+def get_sr_from_name(name: str, default_sr: float) -> float:
+    m = re.search(r'(\d+\.?\d*)\s*mV/s', name, re.IGNORECASE)
+    if m: return float(m.group(1))
+    return default_sr if default_sr is not None else 0.0
 
 def get_averaged_curve(processed_curves: List[Tuple[str, pd.DataFrame, str]]) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     if not processed_curves:
@@ -260,6 +270,7 @@ def extract_lsv_catalytic_parameters(df_curve: pd.DataFrame, area_cm2: float, e_
     return params, fit_data
 
 def apply_scientific_style(fig, is_scientific, lx, ly, lxa, lya):
+    """Aplica el estilo editorial y posiciona la leyenda de forma personalizada."""
     if is_scientific:
         fig.update_layout(
             title="", 
@@ -726,7 +737,11 @@ if uploaded_files:
                     df_mean = pd.DataFrame({"Vf": E_mean, "Im": I_mean})
                     trace_name = custom_labels["ALL"]
                     
-                    group_plot_data.append({"x": E_mean, "y": I_mean, "std": I_std, "name": trace_name, "df": df_mean, "tech": "LSV" if is_group_lsv else "CV"})
+                    srs = [d['sr'] for d in group_data_parsed if d['sr'] is not None and d['sr'] > 0]
+                    fallback_sr = np.mean(srs) if srs else 0.0
+                    sr_val = get_sr_from_name(trace_name, fallback_sr)
+                    
+                    group_plot_data.append({"x": E_mean, "y": I_mean, "std": I_std, "name": trace_name, "df": df_mean, "tech": "LSV" if is_group_lsv else "CV", "sr": sr_val})
                     
                     if show_sd_shadow:
                         fig_comp.add_trace(go.Scatter(x=E_mean, y=I_mean+I_std, mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
@@ -759,7 +774,10 @@ if uploaded_files:
                     df_mean = pd.DataFrame({"Vf": E_mean, "Im": I_mean})
                     trace_name = custom_labels[dat['fname']]
                     
-                    group_plot_data.append({"x": E_mean, "y": I_mean, "std": I_std, "name": trace_name, "df": df_mean, "tech": dat["tech"]})
+                    fallback_sr = dat['sr'] if dat['sr'] else 0.0
+                    sr_val = get_sr_from_name(trace_name, fallback_sr)
+                    
+                    group_plot_data.append({"x": E_mean, "y": I_mean, "std": I_std, "name": trace_name, "df": df_mean, "tech": dat["tech"], "sr": sr_val})
                     
                     if show_sd_shadow:
                         fig_comp.add_trace(go.Scatter(x=E_mean, y=I_mean+I_std, mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
@@ -792,7 +810,10 @@ if uploaded_files:
                         c_color = combined_palette[trace_idx % len(combined_palette)]
                         trace_name = f"{dat['fname']}" if len(dat['curves']) == 1 else f"{dat['fname']} ({cid})"
                         
-                        group_plot_data.append({"x": dd_comp[Ecol].values, "y": dd_comp["Im"].values, "std": None, "name": trace_name, "df": dd_comp, "tech": dat["tech"]})
+                        fallback_sr = dat['sr'] if dat['sr'] else 0.0
+                        sr_val = get_sr_from_name(trace_name, fallback_sr)
+                        
+                        group_plot_data.append({"x": dd_comp[Ecol].values, "y": dd_comp["Im"].values, "std": None, "name": trace_name, "df": dd_comp, "tech": dat["tech"], "sr": sr_val})
                         
                         fig_comp.add_trace(go.Scatter(x=dd_comp[Ecol], y=dd_comp["Im"], mode='lines', name=trace_name, line=dict(color=c_color, width=2)))
                         if "LSV" in dat["tech"]:
@@ -843,7 +864,7 @@ if uploaded_files:
     # --- ZONA: SUPER GROUPS ---
     st.markdown("---")
     st.header("🧬 Super Groups (Combine Groups)")
-    st.markdown("Merge multiple groups into a single master plot. **Ideal for combining averaged 'Species' data.**")
+    st.markdown("Merge multiple groups into a single master plot. **Ideal for combining averaged 'Species' data and calculating Kinetics.**")
     
     if 'num_super_groups' not in st.session_state:
         st.session_state.num_super_groups = 0
@@ -880,6 +901,8 @@ if uploaded_files:
                 sg_lsv_params = []
                 sg_max_log_I = -10
                 
+                sg_cv_kinetics = []
+                
                 for g_idx, g_name in enumerate(selected_groups):
                     if g_name not in prepared_group_data: continue
                     g_data = prepared_group_data[g_name]
@@ -894,6 +917,23 @@ if uploaded_files:
                             final_name = sg_custom_labels[g_name]
                         else:
                             final_name = f"{sg_custom_labels[g_name]} - {tr['name']}"
+                            
+                        # Capture Scan Rate kinetics if CV
+                        if not g_data["is_lsv"] and tr.get("sr") and tr["sr"] > 0:
+                            max_idx = np.argmax(tr["y"])
+                            i_pa = tr["y"][max_idx]
+                            E_pa = tr["x"][max_idx]
+                            j_pa = (i_pa * 1000) / electrode_area
+                            
+                            if j_pa > 0:
+                                sg_cv_kinetics.append({
+                                    "Curve": final_name,
+                                    "v (mV/s)": tr["sr"],
+                                    "log_v": np.log10(tr["sr"]),
+                                    "E_p (V)": E_pa,
+                                    "j_p (mA/cm²)": j_pa,
+                                    "log_jp": np.log10(j_pa)
+                                })
                         
                         if tr["std"] is not None and show_sd_shadow:
                             fig_super.add_trace(go.Scatter(x=tr["x"], y=tr["y"]+tr["std"], mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
@@ -933,6 +973,35 @@ if uploaded_files:
                         fig_super_tafel.update_layout(title="", xaxis_title="log₁₀|I| (A)", yaxis_title=x_axis_label, xaxis=dict(range=[sg_max_log_I - 4.5, sg_max_log_I + 0.2]), height=500)
                         fig_super_tafel = apply_scientific_style(fig_super_tafel, scientific_style, lx, ly, lxa, lya)
                         st.plotly_chart(fig_super_tafel, use_container_width=True, config=dl_config)
+                        
+                elif len(sg_cv_kinetics) > 1:
+                    st.markdown("#### 🔋 CV Kinetics ($b$-value Determination)")
+                    df_cv = pd.DataFrame(sg_cv_kinetics).sort_values("v (mV/s)")
+                    
+                    slope, intercept, r_value, p_value, std_err = linregress(df_cv["log_v"], df_cv["log_jp"])
+                    r2 = r_value**2
+                    
+                    fig_b = go.Figure()
+                    fig_b.add_trace(go.Scatter(x=df_cv["log_v"], y=df_cv["log_jp"], mode='markers', marker=dict(size=10, color='black'), name="Data points"))
+                    
+                    fit_x = np.array([df_cv["log_v"].min() - 0.1, df_cv["log_v"].max() + 0.1])
+                    fit_y = slope * fit_x + intercept
+                    fig_b.add_trace(go.Scatter(x=fit_x, y=fit_y, mode='lines', line=dict(color='red', dash='dash'), name=f"Fit: b = {slope:.2f}"))
+                    
+                    fig_b.update_layout(
+                        xaxis_title="log₁₀(v) [mV/s]",
+                        yaxis_title="log₁₀(j_p) [mA cm⁻²]" if scientific_style else "log₁₀(j_p) [mA/cm²]",
+                        height=450
+                    )
+                    fig_b = apply_scientific_style(fig_b, scientific_style, lx, ly, lxa, lya)
+                    
+                    c1, c2 = st.columns([1, 1])
+                    with c1:
+                        st.plotly_chart(fig_b, use_container_width=True, config=dl_config)
+                    with c2:
+                        st.metric("b-value (Slope ± SE)", f"{slope:.4f} ± {std_err:.4f}", f"R² = {r2:.4f}", delta_color="off")
+                        st.info("💡 **b = 0.5**: Diffusion-controlled process. **b = 1.0**: Surface-controlled (capacitive) process.")
+                        st.dataframe(df_cv[["Curve", "v (mV/s)", "E_p (V)", "j_p (mA/cm²)"]].style.format({"v (mV/s)": "{:.1f}", "E_p (V)": "{:.3f}", "j_p (mA/cm²)": "{:.4f}"}), use_container_width=True)
 
     # --- BOTTOM AREA: INDIVIDUAL ANALYSIS ---
     st.markdown("---")
