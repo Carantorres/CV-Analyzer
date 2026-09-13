@@ -708,7 +708,7 @@ if uploaded_files:
                     def_val = f"{dat['sr']} mV/s" if dat['sr'] else dat['fname']
                     custom_labels[dat['fname']] = cols[i%3].text_input(f"Label for {dat['fname']}", value=def_val, key=f"lbl_g_{g_idx}_{dat['fname']}")
             elif avg_mode == "Average ALL Files into One Curve":
-                custom_labels["ALL"] = st.text_input("Legend Label for Averaged Group:", value=group['header'], key=f"lbl_all_{g_idx}")
+                custom_labels["ALL"] = st.text_input("Legend Label for Averaged Group:", value=group['header'].replace("📊 ", ""), key=f"lbl_all_{g_idx}")
 
         fig_comp, fig_tafel_comp, fig_jeta_comp = go.Figure(), go.Figure(), go.Figure()
         trace_idx, group_lsv_params, max_log_I_global = 0, [], -10 
@@ -866,6 +866,13 @@ if uploaded_files:
             )
             
             if selected_groups:
+                st.markdown("**Customize Legend Labels for this Super Group:**")
+                sg_custom_labels = {}
+                cols = st.columns(3)
+                for i, g_name in enumerate(selected_groups):
+                    clean_name = g_name.replace("📊 ", "")
+                    sg_custom_labels[g_name] = cols[i%3].text_input(f"Label for {clean_name}", value=clean_name, key=f"sg_lbl_{sg}_{i}")
+
                 fig_super = go.Figure()
                 fig_super_tafel = go.Figure()
                 fig_super_jeta = go.Figure()
@@ -883,17 +890,22 @@ if uploaded_files:
                     for tr_idx, tr in enumerate(g_data["traces"]):
                         c_color = base_color
                         
+                        if len(g_data["traces"]) == 1:
+                            final_name = sg_custom_labels[g_name]
+                        else:
+                            final_name = f"{sg_custom_labels[g_name]} - {tr['name']}"
+                        
                         if tr["std"] is not None and show_sd_shadow:
                             fig_super.add_trace(go.Scatter(x=tr["x"], y=tr["y"]+tr["std"], mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
                             fig_super.add_trace(go.Scatter(x=tr["x"], y=tr["y"]-tr["std"], mode='lines', line=dict(width=0), fill='tonexty', fillcolor=to_rgba(c_color, 0.2), showlegend=False, hoverinfo='skip'))
-                        fig_super.add_trace(go.Scatter(x=tr["x"], y=tr["y"], mode='lines', name=tr["name"], line=dict(color=c_color, width=2.5)))
+                        fig_super.add_trace(go.Scatter(x=tr["x"], y=tr["y"], mode='lines', name=final_name, line=dict(color=c_color, width=2.5)))
                         
                         if "LSV" in tr["tech"]:
                             cat_params, fit_data = extract_lsv_catalytic_parameters(tr["df"], electrode_area, e_rev)
                             if cat_params:
                                 sg_lsv_params.append({"Group": g_name, "Curve": tr["name"], **cat_params})
                                 sg_max_log_I = max(sg_max_log_I, fit_data["log_I_max"])
-                                fig_super_tafel.add_trace(go.Scatter(x=fit_data["log_I_full"], y=fit_data["E_full"], mode='lines', name=tr["name"], line=dict(color=c_color, width=2.5)))
+                                fig_super_tafel.add_trace(go.Scatter(x=fit_data["log_I_full"], y=fit_data["E_full"], mode='lines', name=final_name, line=dict(color=c_color, width=2.5)))
                                 if not np.isnan(fit_data["slope"]) and len(fit_data["log_I_fit"]) > 0:
                                     min_x, max_x = np.min(fit_data["log_I_fit"]), np.max(fit_data["log_I_fit"])
                                     span = max_x - min_x
@@ -905,7 +917,7 @@ if uploaded_files:
                                     j_std = (tr["std"] * 1000) / electrode_area
                                     fig_super_jeta.add_trace(go.Scatter(x=fit_data["eta_mV"], y=j_dens+j_std, mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
                                     fig_super_jeta.add_trace(go.Scatter(x=fit_data["eta_mV"], y=j_dens-j_std, mode='lines', line=dict(width=0), fill='tonexty', fillcolor=to_rgba(c_color, 0.2), showlegend=False, hoverinfo='skip'))
-                                fig_super_jeta.add_trace(go.Scatter(x=fit_data["eta_mV"], y=fit_data["j_dens"], mode='lines', name=tr["name"], line=dict(color=c_color, width=2.5)))
+                                fig_super_jeta.add_trace(go.Scatter(x=fit_data["eta_mV"], y=fit_data["j_dens"], mode='lines', name=final_name, line=dict(color=c_color, width=2.5)))
 
                 fig_super.update_layout(title="", xaxis_title=x_axis_label, yaxis_title=i_axis_label, height=500)
                 fig_super = apply_scientific_style(fig_super, scientific_style, lx, ly, lxa, lya)
