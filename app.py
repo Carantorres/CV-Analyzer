@@ -16,8 +16,38 @@ from streamlit_sortables import sort_items
 # PAGE CONFIGURATION
 # ============================================================
 st.set_page_config(page_title="CV Analyzer", layout="wide")
+
 st.title("📊 Universal CV & LSV Analyzer")
-st.markdown("Upload your **Gamry (.DTA)**, **Biologic (.mpt)**, or **PSTrace (.csv)** files to visualize potential sweeps and extract catalytic parameters.")
+
+st.markdown("""
+**A comprehensive tool for automated electrochemical data analysis.** 
+Seamlessly process CV and LSV files from **Gamry (.DTA)**, **Biologic (.mpt)**, and **PalmSens PSTrace (.csv)** potentiostats. 
+This platform automates iR drop compensation, RHE scale conversion, and robust catalytic parameter extraction. Additionally, it features an operating range algorithm that detects noise-free potential windows—avoiding hydrogen evolution and intense oxidation currents—ideal for applications like metal electrodeposition.
+
+*Developed by PhD(c) Carlos A. Torres-Ramírez.*
+""")
+
+with st.expander("📖 Calculation Methods & Algorithms"):
+    st.markdown("""
+    **1. Physico-Chemical Corrections**
+    *   **iR Drop Compensation:** Corrects for the uncompensated resistance ($R_u$) of the electrolyte using Ohm's Law: 
+        $E_{corr} = E_{raw} - (I \\times R_u \\times \\frac{\\text{Comp \\%}}{100})$
+    *   **RHE Scale Conversion:** Shifts the potential to a pH-independent thermodynamic scale using the Nernst equation (at 25°C):
+        $E_{RHE} = E_{corr} + E^0_{Ref} + (0.0591 \\times \\text{pH})$
+
+    **2. Catalytic Parameter Extraction (LSV)**
+    *   **Onset Potential ($E_{onset}$):** Empirically defined as the exact potential where the faradaic current overcomes the capacitive basal noise, set at the point where $|I|$ reaches **5% of the absolute maximum current**.
+    *   **Overpotentials ($\\eta_{10}, \\eta_{50}, \\eta_{100}$):** Calculated via univariate linear interpolation over the sorted current density vector.
+    *   **Robust Tafel Slope:** Computed using a dynamic **Sliding Window algorithm**. The curve is cropped to the pure kinetic region (2% to 40% of $I_{max}$). A moving window calculates the OLS linear regression of $E$ vs $\\log_{10}|j|$ at every step. The algorithm automatically selects and reports the region with the highest coefficient of determination ($R^2$).
+
+    **3. Averaging & Statistical Analysis**
+    *   **Cycle Averaging:** To average cycles with varying data point lengths, individual scans are mapped and interpolated over a normalized coordinate system ($0 \\rightarrow 1$). The arithmetic mean and standard deviation are calculated point-by-point to trace the main solid line and the SD shaded area.
+
+    **4. Operating Range Detection**
+    *   **Noise-Free Electrodeposition Window:** Uses a **Savitzky-Golay filter** coupled with **Median Absolute Deviation (MAD)** to estimate local signal-to-noise ratios. It automatically discards segments with intense faradaic noise (e.g., massive hydrogen bubbling) to recommend a stable and reliable potential window.
+    """)
+
+st.markdown("---")
 
 # ============================================================
 # INSTRUMENT SELECTION
@@ -561,6 +591,18 @@ with st.sidebar:
     st.markdown("---")
     st.header("📄 Export Full Report")
     components.html("""<button onclick="window.parent.print();" style="background-color:#FF4B4B; color:white; border:none; border-radius:4px; padding:0.5rem 1rem; font-size:1rem; font-weight:600; cursor:pointer; width:100%;">🖨️ Save Page as PDF</button>""", height=50)
+    
+    st.markdown(
+        """
+        <div style='text-align: center; margin-top: 50px;'>
+            <p style='color: #888888; font-size: 0.85rem; font-family: sans-serif;'>
+                Developed by<br>
+                <b>PhD(c) Carlos A. Torres-Ramírez</b><br><br>
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
 i_axis_label = "Current, I (A)" if scientific_style else "I (A)"
 j_axis_label = "Current Density, j (mA cm⁻²)" if scientific_style else "Current Density j (mA/cm²)"
