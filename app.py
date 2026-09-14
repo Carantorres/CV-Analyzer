@@ -43,7 +43,7 @@ with st.popover("📖 View Calculation Methods & Algorithms"):
     
     **5. Electrochemical Impedance Spectroscopy (EIS)**
     *   **Nyquist & Bode Plots:** Renders $-Z''$ vs $Z'$ (1:1 ratio), Bode $|Z|$, and Bode Phase natively.
-    *   **Equivalent Circuit Fitting:** Applies Non-Linear Least Squares (CNLS) with **Modulus Weighting** ($\\sigma = |Z|$) to ensure accurate fitting across all impedance magnitudes. Generates a high-density synthetic curve for continuous publication-ready lines. Supports 5 different UOR models including Inductive and Adsorption Pseudocapacitance loops.
+    *   **Equivalent Circuit Fitting:** Applies Non-Linear Least Squares (CNLS) with **Modulus Weighting** ($\\sigma = |Z|$) to ensure accurate fitting across all impedance magnitudes. Generates a high-density synthetic curve for continuous publication-ready lines. Supports 6 different complex UOR models including Multiple Time Constants and Inductive/Adsorption loops.
     """)
 
 st.markdown("---")
@@ -120,7 +120,7 @@ def get_averaged_eis_curve(processed_curves: List[Tuple[str, pd.DataFrame]]) -> 
         
     return common_f[::-1], np.mean(Zr_interp, axis=0)[::-1], np.mean(Zi_interp, axis=0)[::-1], np.std(Zr_interp, axis=0)[::-1], np.std(Zi_interp, axis=0)[::-1]
 
-# --- EIS FITTING MODEL (Weighted CNLS + Smooth Curve + Model Selection) ---
+# --- EIS FITTING MODEL (Weighted CNLS + Smooth Curve + Robust Selection) ---
 def fit_uor_eis(f, zr, zi, model_type):
     y_data = np.hstack([zr, zi])
     Z_data = zr - 1j * zi
@@ -190,6 +190,23 @@ def fit_uor_eis(f, zr, zi, model_type):
         p0 = [1e-5, 0.8, Rct_guess*0.5, 1e-3, 0.9, Rct_guess*0.5]
         bounds = ([1e-9, 0.5, 0, 1e-9, 0.5, 0], [1.0, 1.0, 1e7, 1.0, 1.0, 1e7])
         param_names = ["CPE1-T", "CPE1-P", "Rct (Ω)", "CPE2-T", "CPE2-P", "Rads (Ω)"]
+        
+    elif model_type == "Two Time Constants + Inductive: Rs-(CPE1||R1)-(CPE2||(R2||(RL+L)))":
+        def obj(f_val, CPE1_T, CPE1_P, R1, CPE2_T, CPE2_P, R2, RL, L):
+            w = 2 * np.pi * f_val
+            Z_CPE1 = 1.0 / (CPE1_T * (1j * w)**CPE1_P)
+            Z_1 = 1.0 / (1.0/Z_CPE1 + 1.0/R1)
+            
+            Z_CPE2 = 1.0 / (CPE2_T * (1j * w)**CPE2_P)
+            Z_ind = RL + 1j * w * L
+            Z_faradaic = 1.0 / (1.0/R2 + 1.0/Z_ind)
+            Z_2 = 1.0 / (1.0/Z_CPE2 + 1.0/Z_faradaic)
+            
+            Z_total = Rs_fixed + Z_1 + Z_2
+            return np.hstack([Z_total.real, -Z_total.imag])
+        p0 = [1e-5, 0.8, Rct_guess*0.1, 1e-4, 0.8, Rct_guess*0.9, Rct_guess*0.5, 1000]
+        bounds = ([1e-9, 0.5, 0, 1e-9, 0.5, 0, 0, 1e-5], [1.0, 1.0, 1e7, 1.0, 1.0, 1e7, 1e7, 1e8])
+        param_names = ["CPE1-T", "CPE1-P", "R1 (Ω)", "CPE2-T", "CPE2-P", "R2 (Ω)", "RL (Ω)", "L (H)"]
         
     try:
         popt, pcov = curve_fit(obj, f, y_data, p0=p0, bounds=bounds, sigma=sigma, maxfev=100000)
@@ -828,7 +845,8 @@ if uploaded_files:
                                 "Two Time Constants: Rs-(CPE1||R1)-(CPE2||R2)",
                                 "Parallel Adsorption: Rs-(CPE||(Rct||(RL+L)))", 
                                 "Series Adsorption: Rs-(CPE||(Rct+(RL||L)))",
-                                "Adsorption Capacitance: Rs-(CPE1||(Rct+(CPE2||Rads)))"
+                                "Adsorption Capacitance: Rs-(CPE1||(Rct+(CPE2||Rads)))",
+                                "Two Time Constants + Inductive: Rs-(CPE1||R1)-(CPE2||(R2||(RL+L)))"
                             ], 
                             key=f"eis_model_sel_{sg}",
                             disabled=not fit_eis_model_toggle
@@ -880,6 +898,7 @@ if uploaded_files:
                         
                         if is_sg_eis:
                             zr, zi, f_hz = tr["x"], tr["y"], tr["f"]
+                            # Experimental data as solid markers
                             fig_super.add_trace(go.Scatter(x=zr, y=zi, mode='markers', name=tr["name"], marker=dict(color=c_color, size=6)))
                             
                             z_mod = np.sqrt(zr**2 + zi**2)
@@ -973,14 +992,7 @@ if uploaded_files:
                         df_eis = pd.DataFrame(sg_eis_params)
                         cols = ["Curve", "Rs (Ω)", "CPE-T", "CPE-P", "Rct (Ω)", "RL (Ω)", "L (H)", "CPE1-T", "CPE1-P", "R1 (Ω)", "CPE2-T", "CPE2-P", "R2 (Ω)", "Rads (Ω)", "R²", "χ²"]
                         df_eis = df_eis[[c for c in cols if c in df_eis.columns]]
-                        
-                        format_dict = {
-                            "Rs (Ω)": "{:.2f}", "CPE-T": "{:.2e}", "CPE-P": "{:.3f}", 
-                            "Rct (Ω)": "{:.2f}", "RL (Ω)": "{:.2f}", "L (H)": "{:.2e}", 
-                            "CPE1-T": "{:.2e}", "CPE1-P": "{:.3f}", "R1 (Ω)": "{:.2f}", 
-                            "CPE2-T": "{:.2e}", "CPE2-P": "{:.3f}", "R2 (Ω)": "{:.2f}", "Rads (Ω)": "{:.2f}",
-                            "R²": "{:.4f}", "χ²": "{:.2e}"
-                        }
+                        format_dict = {"Rs (Ω)": "{:.2f}", "CPE-T": "{:.2e}", "CPE-P": "{:.3f}", "Rct (Ω)": "{:.2f}", "RL (Ω)": "{:.2f}", "L (H)": "{:.2e}", "CPE1-T": "{:.2e}", "CPE1-P": "{:.3f}", "R1 (Ω)": "{:.2f}", "CPE2-T": "{:.2e}", "CPE2-P": "{:.3f}", "R2 (Ω)": "{:.2f}", "Rads (Ω)": "{:.2f}", "R²": "{:.4f}", "χ²": "{:.2e}"}
                         st.dataframe(df_eis.style.format({k:v for k,v in format_dict.items() if k in df_eis.columns}), use_container_width=True)
                 else:
                     fig_super.update_layout(title="", xaxis_title=x_axis_label, yaxis_title=i_axis_label, height=500)
