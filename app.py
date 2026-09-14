@@ -16,46 +16,36 @@ from streamlit_sortables import sort_items
 # ============================================================
 # PAGE CONFIGURATION
 # ============================================================
-st.set_page_config(page_title="CV & EIS Analyzer", layout="wide")
-st.title("📊 Universal CV, LSV, CP & EIS Analyzer")
+st.set_page_config(page_title="SPARK Analyzer", layout="wide")
+st.title("⚡ SPARK: System for Potentiostat Analysis & Research Knowledge")
 
 st.markdown("""
-**A comprehensive tool for automated electrochemical data analysis.** 
-Seamlessly process CV, LSV, CP (Galvanostatic), and EIS files. Features robust catalytic parameter extraction, noise-free potential window detection, and equivalent circuit fitting for impedance spectroscopy.
+**A comprehensive tool for automated chemical and electrochemical data analysis.** 
+Seamlessly process CV, LSV, CP (Galvanostatic), EIS files, and **Chemical Speciation Diagrams**. Features robust catalytic parameter extraction, noise-free potential window detection, and equivalent circuit fitting for impedance spectroscopy.
 """)
 
 with st.popover("📖 View Calculation Methods & Algorithms"):
     st.markdown("""
     **1. Physico-Chemical Corrections**
-    *   **iR Drop Compensation:** Corrects for the uncompensated resistance ($R_u$) of the electrolyte.
+    *   **iR Drop Compensation:** Corrects for the uncompensated resistance ($R_u$).
     *   **RHE Scale Conversion:** Shifts the potential to a pH-independent thermodynamic scale.
 
     **2. Catalytic Parameter Extraction (LSV)**
-    *   **Onset Potential ($E_{onset}$):** Point where $|I|$ reaches 5% of the absolute maximum current.
-    *   **Robust Tafel Slope:** Computed using a dynamic Sliding Window algorithm, maximizing $R^2$.
+    *   **Onset Potential ($E_{onset}$):** Point where $|I|$ reaches 5% of absolute maximum.
+    *   **Robust Tafel Slope:** Computed using dynamic Sliding Window algorithm.
 
     **3. Averaging & Statistical Analysis**
-    *   **Cycle Averaging:** Individual scans are mapped and interpolated over a normalized coordinate system to produce unified trendlines for CVs, CPs, and EIS curves.
+    *   **Cycle Averaging:** Individual scans are interpolated over a normalized coordinate system to produce unified trendlines.
 
-    **4. Scan Rate Kinetics ($b$-value Smart Detection)**
-    *   Uses `scipy.signal.find_peaks` to identify true mathematical local maxima.
-    *   A linear regression of $\\log_{10}(j_{pa})$ vs $\\log_{10}(v)$ calculates the slope $b$.
+    **4. Electrochemical Impedance Spectroscopy (EIS)**
+    *   **Equivalent Circuit Fitting:** Applies Non-Linear Least Squares (CNLS) with Modulus Weighting ($\\sigma = |Z|$).
+    *   **Frequency Cropping:** Discards non-stationary low/high frequency data (bubble noise).
     
-    **5. Electrochemical Impedance Spectroscopy (EIS)**
-    *   **Nyquist & Bode Plots:** Renders $-Z''$ vs $Z'$ (1:1 ratio), Bode $|Z|$, and Bode Phase natively.
-    *   **Equivalent Circuit Fitting:** Applies Non-Linear Least Squares (CNLS) with **Modulus Weighting** ($\\sigma = |Z|$) to ensure accurate fitting across all impedance magnitudes. Generates a high-density synthetic curve for continuous publication-ready lines. Supports 8 different literature-backed UOR models with dynamic initial parameter estimation for robust convergence on complex multi-loop systems.
-    *   **Frequency Cropping:** Allows discarding non-stationary low/high frequency data (e.g., gas bubble noise) that violates Kramers-Kronig validity before fitting.
+    **5. Chemical Speciation (Medusa)**
+    *   Parses tabular data exported from Medusa software to generate high-quality fractional distribution diagrams.
     """)
 
 st.markdown("---")
-
-# ============================================================
-# INSTRUMENT SELECTION
-# ============================================================
-instrument = st.selectbox(
-    "Select instrument format:",
-    ["Gamry 1010B (.DTA)", "Biologic SP-50e (.mpt)", "PalmSens PSTrace (.csv)"]
-)
 
 # ============================================================
 # UTILITIES & MATH
@@ -121,7 +111,7 @@ def get_averaged_eis_curve(processed_curves: List[Tuple[str, pd.DataFrame]]) -> 
         
     return common_f[::-1], np.mean(Zr_interp, axis=0)[::-1], np.mean(Zi_interp, axis=0)[::-1], np.std(Zr_interp, axis=0)[::-1], np.std(Zi_interp, axis=0)[::-1]
 
-# --- EIS FITTING MODEL (Weighted CNLS + Advanced Literature Models) ---
+# --- EIS FITTING MODEL ---
 EIS_MODELS_LIST = [
     "Randles: Rs-(CPE||Rct) [Ma et al. 2022]",
     "Randles + Warburg: Rs-(CPE||(Rct+W)) [Metrohm/Generic]",
@@ -272,107 +262,6 @@ def fit_uor_eis(f, zr, zi, model_type):
         return results, f_sim, Z_sim_real, Z_sim_imag
     except Exception as e:
         return None, None, None, None
-
-def extract_limits_from_data(df: pd.DataFrame, technique: str) -> Tuple[float, float, float]:
-    if len(df) == 0: return None, None, None
-    Ecol = "Vf" if "Vf" in df.columns else ("Vu" if "Vu" in df.columns else (df.columns[0] if len(df.columns)>0 else None))
-    if Ecol is None or Ecol not in df.columns: return None, None, None
-    
-    v_data = df[Ecol].dropna().values
-    if len(v_data) == 0: return None, None, None
-        
-    vinit = round(float(v_data[0]), 3)
-    if "LSV" in technique:
-        vlim1 = round(float(v_data[-1]), 3)
-        vlim2 = None
-    else:
-        dv = np.diff(v_data)
-        dv_non_zero = dv[dv != 0]
-        if len(dv_non_zero) == 0: return vinit, vinit, vinit
-        signs = np.sign(dv_non_zero)
-        sign_changes = np.where(signs[:-1] != signs[1:])[0]
-        non_zero_indices = np.where(dv != 0)[0]
-        turn_indices = non_zero_indices[sign_changes] + 1
-        if len(turn_indices) >= 1:
-            vlim1 = round(float(v_data[turn_indices[0]]), 3)
-            vlim2 = round(float(v_data[turn_indices[1]]), 3) if len(turn_indices) >= 2 else round(float(v_data[-1]), 3)
-        else:
-            idx_max_dist = np.argmax(np.abs(v_data - v_data[0]))
-            vlim1 = round(float(v_data[idx_max_dist]), 3)
-            vlim2 = round(float(v_data[-1]), 3)
-    return vinit, vlim1, vlim2
-
-def recommend_operating_ranges_for_curve(df_curve, baseline_E_window=0.20, smooth_window=151, smooth_poly=3, local_window=101, threshold_mode="percentile", nr_fixed=1.30, nr_percentile=95, min_run_points=60, I_tol=0.0):
-    if "x" not in df_curve.columns or "y" not in df_curve.columns:
-        return {"N_points": 0, "noisy_intervals_E": [], "E_cut_cathodic_V": None, "recommended_noise_safe_V": None, "recommended_reduction_only_V": None}
-    
-    df = df_curve[["x", "y"]].copy()
-    df.columns = ["E", "I"]
-    df = df.replace([np.inf, -np.inf], np.nan).dropna().reset_index(drop=True)
-    dfE = df.sort_values("E").reset_index(drop=True)
-    E, I = dfE["E"].values, dfE["I"].values
-    N = len(dfE)
-
-    if N < 15: return {"N_points": N, "noisy_intervals_E": [], "E_cut_cathodic_V": None, "recommended_noise_safe_V": (float(np.min(E)), float(np.max(E))), "recommended_reduction_only_V": None}
-
-    def odd_cap(n):
-        n = n if n % 2 == 1 else n + 1
-        return max(11, min(n, N if (N % 2 == 1) else N - 1))
-
-    smooth_window = odd_cap(smooth_window)
-    local_window = odd_cap(local_window)
-    smooth_poly = min(smooth_poly, smooth_window - 2)
-
-    Is = savgol_filter(I, window_length=smooth_window, polyorder=smooth_poly)
-    resid = I - Is
-
-    Emax = float(np.max(E))
-    base_mask = (E >= (Emax - baseline_E_window)) & (E <= Emax)
-    base_resid = resid[base_mask] if base_mask.sum() >= 10 else resid[np.argsort(E)[-max(10, int(0.10 * N)):]]
-    sigma_base = mad_sigma(base_resid)
-    if not np.isfinite(sigma_base) or sigma_base == 0: sigma_base = float(np.std(resid)) if np.std(resid) > 0 else 1e-12
-
-    half = local_window // 2
-    NR = np.empty(N, dtype=float)
-    for i in range(N):
-        lo, hi = max(0, i - half), min(N, i + half + 1)
-        sigma_loc = mad_sigma(resid[lo:hi])
-        NR[i] = sigma_loc / sigma_base if np.isfinite(sigma_loc) and sigma_base > 0 else np.nan
-
-    NR_finite = NR[np.isfinite(NR)]
-    thr = float(nr_fixed) if threshold_mode == "fixed" else float(np.percentile(NR_finite, nr_percentile))
-    bad = np.isfinite(NR) & (NR >= thr)
-
-    min_run_eff, noisy_intervals, i = min(min_run_points, max(10, N // 6)), [], 0
-    while i < N:
-        if bad[i]:
-            j = i
-            while j < N and bad[j]: j += 1
-            if (j - i) >= min_run_eff: noisy_intervals.append((float(E[i]), float(E[j - 1])))
-            i = j
-        else: i += 1
-
-    idx_desc = np.argsort(E)[::-1]
-    bad_desc, E_desc = bad[idx_desc], E[idx_desc]
-    E_cut, k = None, 0
-    while k < N:
-        if bad_desc[k]:
-            m = k
-            while m < N and bad_desc[m]: m += 1
-            if (m - k) >= min_run_eff:
-                E_cut = float(E_desc[k])
-                break
-            k = m
-        else: k += 1
-
-    noise_safe = (float(np.min(E)), Emax) if E_cut is None else (E_cut, Emax)
-    df_safe = df[(df["E"] >= noise_safe[0]) & (df["E"] <= noise_safe[1])].dropna()
-    red_range = None
-    if not df_safe.empty:
-        mask_red = df_safe["I"].values <= I_tol
-        if np.any(mask_red): red_range = (float(np.min(df_safe["E"].values[mask_red])), float(np.max(df_safe["E"].values[mask_red])))
-
-    return {"N_points": N, "noisy_intervals_E": noisy_intervals, "E_cut_cathodic_V": E_cut, "recommended_noise_safe_V": noise_safe, "recommended_reduction_only_V": red_range}
 
 def extract_lsv_catalytic_parameters(df_curve: pd.DataFrame, area_cm2: float, e_rev: float) -> Tuple[dict, dict]:
     if "x" not in df_curve.columns or "y" not in df_curve.columns: return {}, {}
@@ -584,6 +473,8 @@ def parse_pstrace_csv(raw: bytes) -> Tuple[Dict[str, str], List[Tuple[str, pd.Da
     for enc in ['utf-8', 'utf-16', 'latin1']:
         try:
             text = raw.decode(enc)
+            # Deteccion de exportacion de Medusa
+            if "Fraction" in text or "fraction" in text or "pH" in text: break
             if "Linear Sweep" in text or "Cyclic Voltammetry" in text or "Impedance" in text or "Chronopotentiometry" in text or "CP" in text: break
         except: continue
     if not text: return {}, []
@@ -594,8 +485,32 @@ def parse_pstrace_csv(raw: bytes) -> Tuple[Dict[str, str], List[Tuple[str, pd.Da
     scan_names = []
     unit_row_idx = -1
     
-    is_eis, is_cp = False, False
+    is_eis, is_cp, is_medusa = False, False, False
     
+    # Fast check for Medusa exported TXT/CSV (Tabular data)
+    if any("Fraction" in l or "fraction" in l for l in lines[:10]):
+        meta["TECHNIQUE"] = "Chemical Speciation (Medusa)"
+        is_medusa = True
+        
+        header_idx = -1
+        for i, line in enumerate(lines[:20]):
+            if "pH" in line or "Fraction" in line:
+                header_idx = i
+                break
+        
+        if header_idx != -1:
+            delimiter = "\t" if "\t" in lines[header_idx] else ","
+            df = pd.read_csv(io.StringIO(text), sep=delimiter, header=header_idx)
+            df = df.replace([np.inf, -np.inf], np.nan).dropna(axis=1, how='all')
+            
+            x_col = df.columns[0] # Usually pH
+            for c in df.columns[1:]:
+                df_clean = df[[x_col, c]].dropna().copy()
+                df_clean.columns = ["x", "y"]
+                curves.append((c.strip(), df_clean))
+        return meta, curves
+
+    # Normal Electrochemistry check
     for line in lines[:20]:
         if "Linear Sweep" in line or "LSV" in line: meta["TECHNIQUE"] = "Linear Sweep Voltammetry (LSV)"
         elif "Cyclic Voltammetry" in line or "CV" in line: meta["TECHNIQUE"] = "Cyclic Voltammetry (CV)"
@@ -701,35 +616,10 @@ def parse_pstrace_csv(raw: bytes) -> Tuple[Dict[str, str], List[Tuple[str, pd.Da
         curves.append((name, df_scan))
     return meta, curves
 
-def convert_df_to_excel(curves_list: List[Tuple[str, pd.DataFrame]]) -> bytes:
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        seen_names = set()
-        for cid, df in curves_list:
-            if "Z_real" in df.columns and "neg_Z_imag" in df.columns:
-                clean_df = df.replace([np.inf, -np.inf], np.nan).dropna(subset=["Z_real", "neg_Z_imag"])
-            elif "Time" in df.columns and "Vf" in df.columns:
-                clean_df = df.replace([np.inf, -np.inf], np.nan).dropna(subset=["Time", "Vf"])
-            else:
-                Ecol = "Vf" if "Vf" in df.columns else ("Vu" if "Vu" in df.columns else None)
-                if Ecol is None or "Im" not in df.columns: continue
-                clean_df = df.replace([np.inf, -np.inf], np.nan).dropna(subset=[Ecol, "Im"])
-            
-            if len(clean_df) >= 5:
-                safe_name = re.sub(r'[\\*?:/\[\]]', '_', cid)[:31].strip() or "Sheet"
-                original_safe_name, counter = safe_name, 1
-                while safe_name in seen_names:
-                    suffix = f"_{counter}"
-                    safe_name = f"{original_safe_name[:31-len(suffix)]}{suffix}"
-                    counter += 1
-                seen_names.add(safe_name)
-                clean_df.to_excel(writer, index=False, sheet_name=safe_name)
-    return output.getvalue()
-
 # ============================================================
 # APP LOGIC
 # ============================================================
-uploaded_files = st.file_uploader("Upload CV/LSV/CP/EIS files", type=["csv", "CSV", "DTA", "dta", "mpt", "MPT"], accept_multiple_files=True)
+uploaded_files = st.file_uploader("Upload CV/LSV/CP/EIS or Medusa (tabular) files", type=["csv", "CSV", "DTA", "dta", "mpt", "MPT", "txt", "TXT"], accept_multiple_files=True)
 
 publication_palette = ['#000000', '#E41A1C', '#377EB8', '#4DAF4A', '#984EA3', '#FF7F00', '#A65628', '#F781BF'] + px.colors.qualitative.Alphabet
 combined_palette = publication_palette
@@ -841,7 +731,7 @@ if uploaded_files:
         valid_groups_for_super.append(group["header"])
             
         group_data_parsed = []
-        is_group_lsv, is_group_eis, is_group_cp = False, False, False
+        is_group_lsv, is_group_eis, is_group_cp, is_group_medusa = False, False, False, False
         
         for item in group["items"]:
             fname = item.replace("⋮⋮ ", "")
@@ -862,6 +752,7 @@ if uploaded_files:
             if "LSV" in tech_sg: is_group_lsv = True
             if "EIS" in tech_sg: is_group_eis = True
             if "CP" in tech_sg or "Chronopotentiometry" in tech_sg: is_group_cp = True
+            if "Medusa" in tech_sg: is_group_medusa = True
                 
             processed_curves = []
             for cid, df_comp in curves_comp:
@@ -877,6 +768,9 @@ if uploaded_files:
                         if convert_to_rhe: dd_comp["Vf"] = dd_comp["Vf"] + e0_ref + (0.0591 * ph_val)
                         dd_comp.columns = ["x", "y"]
                         if len(dd_comp) >= 2: processed_curves.append((cid, dd_comp))
+                elif "Medusa" in tech_sg:
+                    # Medusa pre-parsed as x, y
+                    processed_curves.append((cid, df_comp))
                 else:
                     Ecol = "Vf" if "Vf" in df_comp.columns else ("Vu" if "Vu" in df_comp.columns else None)
                     if Ecol and "Im" in df_comp.columns:
@@ -892,11 +786,11 @@ if uploaded_files:
         if len(group_data_parsed) > 0:
             for dat in group_data_parsed:
                 for cid, dd_comp in dat["curves"]:
-                    trace_name = f"{dat['fname']}" if len(dat['curves']) == 1 else f"{dat['fname']} ({cid})"
+                    trace_name = f"{cid}" if "Medusa" in dat["tech"] else (f"{dat['fname']}" if len(dat['curves']) == 1 else f"{dat['fname']} ({cid})")
                     sr_val = get_sr_from_name(trace_name, dat['sr'] if dat['sr'] else 0.0)
                     group_plot_data.append({"x": dd_comp["x"].values, "y": dd_comp["y"].values, "f": dd_comp.get("f", pd.Series(dtype=float)).values, "std": None, "name": trace_name, "df": dd_comp, "tech": dat["tech"], "sr": sr_val})
                         
-        prepared_group_data[group['header']] = {"traces": group_plot_data, "is_lsv": is_group_lsv, "is_eis": is_group_eis, "is_cp": is_group_cp}
+        prepared_group_data[group['header']] = {"traces": group_plot_data, "is_lsv": is_group_lsv, "is_eis": is_group_eis, "is_cp": is_group_cp, "is_medusa": is_group_medusa}
 
     # --- ZONA: SUPER GROUPS ---
     st.markdown("---")
@@ -920,6 +814,7 @@ if uploaded_files:
                 is_sg_eis = any(prepared_group_data[g].get("is_eis", False) for g in selected_groups if g in prepared_group_data)
                 is_sg_lsv = any(prepared_group_data[g].get("is_lsv", False) for g in selected_groups if g in prepared_group_data)
                 is_sg_cp = any(prepared_group_data[g].get("is_cp", False) for g in selected_groups if g in prepared_group_data)
+                is_sg_medusa = any(prepared_group_data[g].get("is_medusa", False) for g in selected_groups if g in prepared_group_data)
                 
                 avg_mode = st.radio("Super Group Mode:", ["Plot Individual Files", "Average ALL Files inside each Group"], key=f"sg_avg_{sg}", horizontal=True)
                 
@@ -972,6 +867,12 @@ if uploaded_files:
                             E_mean, I_mean, I_std = get_averaged_curve([(tr["name"], tr["df"]) for tr in g_data["traces"]])
                             df_mean = pd.DataFrame({"x": E_mean, "y": I_mean})
                             traces_to_plot = [{"x": E_mean, "y": I_mean, "f": None, "std": I_std, "name": sg_custom_labels[g_name], "df": df_mean, "tech": "CP", "sr": 0.0, "group": g_name}]
+                        elif is_sg_medusa:
+                            st.warning("Averaging is not supported for Medusa diagrams. Plotting individually.")
+                            for tr in g_data["traces"]:
+                                tr_copy = tr.copy()
+                                tr_copy["group"] = g_name
+                                traces_to_plot.append(tr_copy)
                         else:
                             E_mean, I_mean, I_std = get_averaged_curve([(tr["name"], tr["df"]) for tr in g_data["traces"]])
                             df_mean = pd.DataFrame({"x": E_mean, "y": I_mean})
@@ -979,15 +880,22 @@ if uploaded_files:
                             sr_val = get_sr_from_name(sg_custom_labels[g_name], fallback_sr)
                             traces_to_plot = [{"x": E_mean, "y": I_mean, "f": None, "std": I_std, "name": sg_custom_labels[g_name], "df": df_mean, "tech": "LSV" if is_sg_lsv else "CV", "sr": sr_val, "group": g_name}]
                     else:
-                        for tr in g_data["traces"]:
-                            final_name = sg_custom_labels[g_name] if len(g_data["traces"]) == 1 else f"{sg_custom_labels[g_name]} - {tr['name']}"
+                        for idx_tr, tr in enumerate(g_data["traces"]):
+                            if is_sg_medusa:
+                                final_name = f"{tr['name']}"
+                                c_color = combined_palette[idx_tr % len(combined_palette)]
+                            else:
+                                final_name = sg_custom_labels[g_name] if len(g_data["traces"]) == 1 else f"{sg_custom_labels[g_name]} - {tr['name']}"
+                                c_color = base_color
+                                
                             tr_copy = tr.copy()
                             tr_copy["name"] = final_name
                             tr_copy["group"] = g_name
+                            tr_copy["color"] = c_color
                             traces_to_plot.append(tr_copy)
 
                     for tr in traces_to_plot:
-                        c_color = base_color
+                        c_color = tr.get("color", base_color)
                         
                         if is_sg_eis:
                             zr, zi, f_hz = tr["x"], tr["y"], tr["f"]
@@ -1015,6 +923,8 @@ if uploaded_files:
                             if tr.get("std") is not None and show_sd_shadow:
                                 fig_super.add_trace(go.Scatter(x=tr["x"], y=tr["y"]+tr["std"], mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
                                 fig_super.add_trace(go.Scatter(x=tr["x"], y=tr["y"]-tr["std"], mode='lines', line=dict(width=0), fill='tonexty', fillcolor=to_rgba(c_color, 0.2), showlegend=False, hoverinfo='skip'))
+                            fig_super.add_trace(go.Scatter(x=tr["x"], y=tr["y"], mode='lines', name=tr["name"], line=dict(color=c_color, width=2.5)))
+                        elif is_sg_medusa:
                             fig_super.add_trace(go.Scatter(x=tr["x"], y=tr["y"], mode='lines', name=tr["name"], line=dict(color=c_color, width=2.5)))
                         else:
                             if not is_sg_lsv and tr.get("sr") and tr["sr"] > 0:
@@ -1105,6 +1015,10 @@ if uploaded_files:
                     fig_super.update_layout(title="Galvanostatic Charge-Discharge" if not scientific_style else "", xaxis_title="Time t (s)", yaxis_title=x_axis_label, height=500)
                     fig_super = apply_scientific_style(fig_super, scientific_style, lx, ly, lxa, lya)
                     st.plotly_chart(fig_super, use_container_width=True, config=dl_config)
+                elif is_sg_medusa:
+                    fig_super.update_layout(title="Chemical Speciation" if not scientific_style else "", xaxis_title="pH", yaxis_title="Fraction", height=500)
+                    fig_super = apply_scientific_style(fig_super, scientific_style, lx, ly, lxa, lya)
+                    st.plotly_chart(fig_super, use_container_width=True, config=dl_config)
                 else:
                     fig_super.update_layout(title="", xaxis_title=x_axis_label, yaxis_title=i_axis_label, height=500)
                     fig_super = apply_scientific_style(fig_super, scientific_style, lx, ly, lxa, lya)
@@ -1169,7 +1083,8 @@ if uploaded_files:
         vinit, vlim1, vlim2 = None, None, None
         is_eis = "EIS" in technique
         is_cp = "CP" in technique or "Chronopotentiometry" in technique
-        if not is_eis and not is_cp: vinit, vlim1, vlim2 = extract_limits_from_data(curves[0][1], technique)
+        is_medusa = "Medusa" in technique
+        if not is_eis and not is_cp and not is_medusa: vinit, vlim1, vlim2 = extract_limits_from_data(curves[0][1], technique)
 
         st.markdown(f"### {file.name}")
         col_title, col_btn = st.columns([4, 1])
@@ -1180,6 +1095,8 @@ if uploaded_files:
             st.info("💡 **Electrochemical Impedance Spectroscopy (EIS) Data:** Generating Nyquist Plot (-Z'' vs Z')")
         elif is_cp:
             st.info("💡 **Chronopotentiometry (CP) Data:** Generating Galvanostatic Plot (E vs t)")
+        elif is_medusa:
+            st.info("💡 **Chemical Speciation Data:** Generating Distribution Diagram")
         else:
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Initial Potential", f"{vinit} V" if vinit is not None else "N/A")
@@ -1205,6 +1122,8 @@ if uploaded_files:
                     if convert_to_rhe: dd["Vf"] = dd["Vf"] + e0_ref + (0.0591 * ph_val)
                     dd.columns = ["x", "y"]
                     if len(dd) >= 2: processed_curves.append((cid, dd))
+            elif is_medusa:
+                processed_curves.append((cid, dfi))
             else:
                 Ecol = "Vf" if "Vf" in dfi.columns else ("Vu" if "Vu" in dfi.columns else None)
                 if Ecol is None or "Im" not in dfi.columns: continue
@@ -1219,7 +1138,7 @@ if uploaded_files:
         fig, fig_tafel, fig_jeta = go.Figure(), go.Figure(), go.Figure()
         results_list, lsv_cat_list, max_log_I_ind = [], [], -10
 
-        avg_cycles = st.toggle(f"🌟 Average {len(processed_curves)} Cycles/Scans", key=f"avg_{file.name}") if len(processed_curves) > 1 else False
+        avg_cycles = st.toggle(f"🌟 Average {len(processed_curves)} Cycles/Scans", key=f"avg_{file.name}") if len(processed_curves) > 1 and not is_medusa else False
 
         if avg_cycles:
             if is_eis:
@@ -1272,6 +1191,8 @@ if uploaded_files:
                     fig.add_trace(go.Scatter(x=dd["x"], y=dd["y"], mode='markers', name=cid, marker=dict(color=line_color, size=6)))
                 elif is_cp:
                     fig.add_trace(go.Scatter(x=dd["x"], y=dd["y"], mode='lines', name=cid, line=dict(color=line_color, width=2)))
+                elif is_medusa:
+                    fig.add_trace(go.Scatter(x=dd["x"], y=dd["y"], mode='lines', name=cid, line=dict(color=line_color, width=2.5)))
                 else:
                     fig.add_trace(go.Scatter(x=dd["x"], y=dd["y"], mode='lines', name=cid, line=dict(color=line_color, width=2)))
                     out = recommend_operating_ranges_for_curve(dd)
@@ -1298,11 +1219,14 @@ if uploaded_files:
         elif is_cp:
             x_title = "Time t (s)"
             y_title = x_axis_label
+        elif is_medusa:
+            x_title = "pH"
+            y_title = "Fraction"
         else:
             x_title = x_axis_label
             y_title = i_axis_label
             
-        title_txt = "Nyquist Plot" if is_eis else "Galvanostatic Charge-Discharge" if is_cp else "Raw Data" if not scientific_style else ""
+        title_txt = "Nyquist Plot" if is_eis else "Galvanostatic Charge-Discharge" if is_cp else "Chemical Speciation" if is_medusa else "Raw Data" if not scientific_style else ""
         fig.update_layout(title=title_txt, xaxis_title=x_title, yaxis_title=y_title, height=500)
         
         if is_eis: fig.update_yaxes(scaleanchor="x", scaleratio=1)
@@ -1310,7 +1234,7 @@ if uploaded_files:
         fig = apply_scientific_style(fig, scientific_style, lx, ly, lxa, lya)
         st.plotly_chart(fig, use_container_width=True, config=dl_config)
         
-        if "LSV" in technique and lsv_cat_list and not is_eis and not is_cp:
+        if "LSV" in technique and lsv_cat_list and not is_eis and not is_cp and not is_medusa:
             c1, c2 = st.columns(2)
             with c1:
                 fig_jeta.update_layout(title="Catalytic Performance" if not scientific_style else "", xaxis_title="Overpotential η (mV)", yaxis_title=j_axis_label, height=500)
@@ -1321,6 +1245,6 @@ if uploaded_files:
                 fig_tafel = apply_scientific_style(fig_tafel, scientific_style, lx, ly, lxa, lya)
                 st.plotly_chart(fig_tafel, use_container_width=True, config=dl_config)
         
-        if results_list and not is_eis and not is_cp: st.write("**Recommended Operating Ranges:**"); st.dataframe(pd.DataFrame(results_list), use_container_width=True)
-        if lsv_cat_list and not is_eis and not is_cp: st.write("**🧪 Catalytic Parameters:**"); st.dataframe(pd.DataFrame(lsv_cat_list), use_container_width=True)
+        if results_list and not is_eis and not is_cp and not is_medusa: st.write("**Recommended Operating Ranges:**"); st.dataframe(pd.DataFrame(results_list), use_container_width=True)
+        if lsv_cat_list and not is_eis and not is_cp and not is_medusa: st.write("**🧪 Catalytic Parameters:**"); st.dataframe(pd.DataFrame(lsv_cat_list), use_container_width=True)
         st.markdown("<br><br>", unsafe_allow_html=True)
