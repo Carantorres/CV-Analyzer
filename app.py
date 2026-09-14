@@ -43,7 +43,7 @@ with st.popover("📖 View Calculation Methods & Algorithms"):
     
     **5. Electrochemical Impedance Spectroscopy (EIS)**
     *   **Nyquist & Bode Plots:** Renders $-Z''$ vs $Z'$ (1:1 ratio), Bode $|Z|$, and Bode Phase natively.
-    *   **Equivalent Circuit Fitting:** Applies Non-Linear Least Squares (CNLS) with **Modulus Weighting** ($\\sigma = |Z|$) to ensure accurate fitting across all impedance magnitudes. Generates a high-density synthetic curve for continuous publication-ready lines. Supports advanced models including 3 Time Constants for complex bilayer oxide structures (e.g., pure Ni forming inner Ni(OH)2 and outer NiOOH layers).
+    *   **Equivalent Circuit Fitting:** Applies Non-Linear Least Squares (CNLS) with **Modulus Weighting** ($\\sigma = |Z|$) to ensure accurate fitting across all impedance magnitudes. Generates a high-density synthetic curve for continuous publication-ready lines. Supports highly advanced UOR models, including Bilayer (Inner Ni(OH)2 / Outer NiOOH) structures with Inductive loops.
     """)
 
 st.markdown("---")
@@ -120,7 +120,7 @@ def get_averaged_eis_curve(processed_curves: List[Tuple[str, pd.DataFrame]]) -> 
         
     return common_f[::-1], np.mean(Zr_interp, axis=0)[::-1], np.mean(Zi_interp, axis=0)[::-1], np.std(Zr_interp, axis=0)[::-1], np.std(Zi_interp, axis=0)[::-1]
 
-# --- EIS FITTING MODEL (Weighted CNLS + 3 Time Constants) ---
+# --- EIS FITTING MODEL (Weighted CNLS + Advanced Literature Models) ---
 EIS_MODELS_LIST = [
     "Randles: Rs-(CPE||Rct) [Ma et al. 2022]",
     "Randles + Warburg: Rs-(CPE||(Rct+W)) [Metrohm/Generic]",
@@ -128,10 +128,8 @@ EIS_MODELS_LIST = [
     "Parallel Adsorption: Rs-(CPE||(Rct||(RL+L))) [Classic UOR]",
     "Series Adsorption: Rs-(CPE||(Rct+(RL||L))) [Harrington-Conway]",
     "Adsorption Capacitance: Rs-(CPE1||(Rct+(CPE2||Rads))) [ACS Appl. Mater. 2026]",
-    "Inductive + Adsorption: Rs+L+(CPE1||(Rct+(CPE2||Rads))) [Springer 2017]",
-    "Two Constants + Inductive: Rs-(CPE1||R1)-(CPE2||(R2||(RL+L))) [Ni-P UOR Review]",
-    "Three Time Constants: Rs-(CPE1||R1)-(CPE2||R2)-(CPE3||R3) [Bilayer NiOOH]",
-    "Three Constants + Inductive: Rs-(CPE1||R1)-(CPE2||R2)-(CPE3||(R3||(RL+L))) [Bare Ni UOR]"
+    "Bilayer + Series Adsorption: Rs-(CPE1||R1)-(CPE2||(Rct+(RL||L))) [NiOOH/Ni UOR]",
+    "Three Time Constants: Rs-(CPE1||R1)-(CPE2||R2)-(CPE3||R3) [Bilayer NiOOH]"
 ]
 
 def fit_uor_eis(f, zr, zi, model_type):
@@ -164,7 +162,7 @@ def fit_uor_eis(f, zr, zi, model_type):
         bounds = ([1e-9, 0.5, 0, 0], [1.0, 1.0, 1e7, 1e8])
         param_names = ["CPE-T", "CPE-P", "Rct (Ω)", "W (Ω·s^-0.5)"]
         
-    elif "Two Time Constants" in model_type and "Inductive" not in model_type:
+    elif "Two Time Constants" in model_type:
         def obj(f_val, CPE1_T, CPE1_P, R1, CPE2_T, CPE2_P, R2):
             w = 2 * np.pi * f_val
             Z_CPE1 = 1.0 / (CPE1_T * (1j * w)**CPE1_P)
@@ -215,36 +213,23 @@ def fit_uor_eis(f, zr, zi, model_type):
         bounds = ([1e-9, 0.5, 0, 1e-9, 0.5, 0], [1.0, 1.0, 1e7, 1.0, 1.0, 1e7])
         param_names = ["CPE1-T", "CPE1-P", "Rct (Ω)", "CPE2-T", "CPE2-P", "Rads (Ω)"]
         
-    elif "Inductive + Adsorption" in model_type:
-        def obj(f_val, L_s, CPE1_T, CPE1_P, Rct, CPE2_T, CPE2_P, Rads):
-            w = 2 * np.pi * f_val
-            Z_Ls = 1j * w * L_s
-            Z_CPE1 = 1.0 / (CPE1_T * (1j * w)**CPE1_P)
-            Z_CPE2 = 1.0 / (CPE2_T * (1j * w)**CPE2_P)
-            Z_ads = 1.0 / (1.0/Z_CPE2 + 1.0/Rads)
-            Z_faradaic = Rct + Z_ads
-            Z_total = Rs_fixed + Z_Ls + 1.0 / (1.0/Z_CPE1 + 1.0/Z_faradaic)
-            return np.hstack([Z_total.real, -Z_total.imag])
-        p0 = [1e-6, 1e-5, 0.8, Rct_guess*0.5, 1e-3, 0.9, Rct_guess*0.5]
-        bounds = ([0, 1e-9, 0.5, 0, 1e-9, 0.5, 0], [1e-2, 1.0, 1.0, 1e7, 1.0, 1.0, 1e7])
-        param_names = ["Ls (H)", "CPE1-T", "CPE1-P", "Rct (Ω)", "CPE2-T", "CPE2-P", "Rads (Ω)"]
-        
-    elif "Two Constants + Inductive" in model_type:
-        def obj(f_val, CPE1_T, CPE1_P, R1, CPE2_T, CPE2_P, R2, RL, L):
+    elif "Bilayer + Series Adsorption" in model_type:
+        def obj(f_val, CPE1_T, CPE1_P, R1, CPE2_T, CPE2_P, Rct, RL, L):
             w = 2 * np.pi * f_val
             Z_CPE1 = 1.0 / (CPE1_T * (1j * w)**CPE1_P)
             Z_1 = 1.0 / (1.0/Z_CPE1 + 1.0/R1)
             Z_CPE2 = 1.0 / (CPE2_T * (1j * w)**CPE2_P)
-            Z_ind = RL + 1j * w * L
-            Z_faradaic = 1.0 / (1.0/R2 + 1.0/Z_ind)
+            Z_L = 1j * w * L
+            Z_ind = 1.0 / (1.0/RL + 1.0/Z_L)
+            Z_faradaic = Rct + Z_ind
             Z_2 = 1.0 / (1.0/Z_CPE2 + 1.0/Z_faradaic)
             Z_total = Rs_fixed + Z_1 + Z_2
             return np.hstack([Z_total.real, -Z_total.imag])
         p0 = [1e-5, 0.8, Rct_guess*0.1, 1e-4, 0.8, Rct_guess*0.9, Rct_guess*0.5, 1000]
-        bounds = ([1e-9, 0.5, 0, 1e-9, 0.5, 0, 0, 1e-5], [1.0, 1.0, 1e7, 1.0, 1.0, 1e7, 1e7, 1e8])
-        param_names = ["CPE1-T", "CPE1-P", "R1 (Ω)", "CPE2-T", "CPE2-P", "R2 (Ω)", "RL (Ω)", "L (H)"]
+        bounds = ([1e-9, 0.5, 0, 1e-9, 0.5, 0, -1e7, 1e-5], [1.0, 1.0, 1e7, 1.0, 1.0, 1e7, 1e7, 1e8])
+        param_names = ["CPE1-T", "CPE1-P", "R1 (Ω)", "CPE2-T", "CPE2-P", "Rct (Ω)", "RL (Ω)", "L (H)"]
 
-    elif "Three Time Constants: Rs-(CPE1||R1)-(CPE2||R2)-(CPE3||R3)" in model_type:
+    elif "Three Time Constants" in model_type:
         def obj(f_val, CPE1_T, CPE1_P, R1, CPE2_T, CPE2_P, R2, CPE3_T, CPE3_P, R3):
             w = 2 * np.pi * f_val
             Z_CPE1 = 1.0 / (CPE1_T * (1j * w)**CPE1_P)
@@ -258,23 +243,6 @@ def fit_uor_eis(f, zr, zi, model_type):
         p0 = [1e-5, 0.8, Rct_guess*0.1, 1e-4, 0.8, Rct_guess*0.3, 1e-3, 0.8, Rct_guess*0.6]
         bounds = ([1e-9, 0.5, 0, 1e-9, 0.5, 0, 1e-9, 0.5, 0], [1.0, 1.0, 1e7, 1.0, 1.0, 1e7, 1.0, 1.0, 1e7])
         param_names = ["CPE1-T", "CPE1-P", "R1 (Ω)", "CPE2-T", "CPE2-P", "R2 (Ω)", "CPE3-T", "CPE3-P", "R3 (Ω)"]
-
-    elif "Three Constants + Inductive: Rs-(CPE1||R1)-(CPE2||R2)-(CPE3||(R3||(RL+L)))" in model_type:
-        def obj(f_val, CPE1_T, CPE1_P, R1, CPE2_T, CPE2_P, R2, CPE3_T, CPE3_P, R3, RL, L):
-            w = 2 * np.pi * f_val
-            Z_CPE1 = 1.0 / (CPE1_T * (1j * w)**CPE1_P)
-            Z_1 = 1.0 / (1.0/Z_CPE1 + 1.0/R1)
-            Z_CPE2 = 1.0 / (CPE2_T * (1j * w)**CPE2_P)
-            Z_2 = 1.0 / (1.0/Z_CPE2 + 1.0/R2)
-            Z_CPE3 = 1.0 / (CPE3_T * (1j * w)**CPE3_P)
-            Z_ind = RL + 1j * w * L
-            Z_faradaic = 1.0 / (1.0/R3 + 1.0/Z_ind)
-            Z_3 = 1.0 / (1.0/Z_CPE3 + 1.0/Z_faradaic)
-            Z_total = Rs_fixed + Z_1 + Z_2 + Z_3
-            return np.hstack([Z_total.real, -Z_total.imag])
-        p0 = [1e-5, 0.8, Rct_guess*0.05, 1e-4, 0.8, Rct_guess*0.2, 1e-3, 0.8, Rct_guess*0.75, Rct_guess*0.5, 1000]
-        bounds = ([1e-9, 0.5, 0, 1e-9, 0.5, 0, 1e-9, 0.5, 0, 0, 1e-5], [1.0, 1.0, 1e7, 1.0, 1.0, 1e7, 1.0, 1.0, 1e7, 1e7, 1e8])
-        param_names = ["CPE1-T", "CPE1-P", "R1 (Ω)", "CPE2-T", "CPE2-P", "R2 (Ω)", "CPE3-T", "CPE3-P", "R3 (Ω)", "RL (Ω)", "L (H)"]
         
     try:
         popt, pcov = curve_fit(obj, f, y_data, p0=p0, bounds=bounds, sigma=sigma, maxfev=100000)
