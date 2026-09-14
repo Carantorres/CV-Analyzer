@@ -43,7 +43,7 @@ with st.popover("📖 View Calculation Methods & Algorithms"):
     
     **5. Electrochemical Impedance Spectroscopy (EIS)**
     *   **Nyquist & Bode Plots:** Renders $-Z''$ vs $Z'$ (1:1 ratio), Bode $|Z|$, and Bode Phase natively.
-    *   **Equivalent Circuit Fitting:** Applies Non-Linear Least Squares (CNLS) with **Modulus Weighting** ($\\sigma = |Z|$) to ensure accurate fitting across all impedance magnitudes. Generates a high-density synthetic curve for continuous publication-ready lines. Supports highly advanced UOR models, including Bilayer (Inner Ni(OH)2 / Outer NiOOH) structures with Inductive loops.
+    *   **Equivalent Circuit Fitting:** Applies Non-Linear Least Squares (CNLS) with **Modulus Weighting** ($\\sigma = |Z|$) to ensure accurate fitting across all impedance magnitudes. Generates a high-density synthetic curve for continuous publication-ready lines. Supports 8 different literature-backed UOR models with dynamic initial parameter estimation for robust convergence on complex multi-loop systems.
     """)
 
 st.markdown("---")
@@ -139,7 +139,8 @@ def fit_uor_eis(f, zr, zi, model_type):
     sigma = np.hstack([abs_Z, abs_Z]) # Modulus weighting
     
     Rs_fixed = np.min(zr)
-    Rct_guess = np.abs(np.max(zr) - Rs_fixed)
+    R_tot = np.abs(np.max(zr) - Rs_fixed)
+    Rct_guess = R_tot
     
     if "Randles: Rs-(CPE||Rct)" in model_type:
         def obj(f_val, CPE_T, CPE_P, Rct):
@@ -171,7 +172,7 @@ def fit_uor_eis(f, zr, zi, model_type):
             Z_2 = 1.0 / (1.0/Z_CPE2 + 1.0/R2)
             Z_total = Rs_fixed + Z_1 + Z_2
             return np.hstack([Z_total.real, -Z_total.imag])
-        p0 = [1e-5, 0.8, Rct_guess*0.1, 1e-3, 0.8, Rct_guess*0.9]
+        p0 = [1e-5, 0.8, R_tot*0.1, 1e-3, 0.8, R_tot*0.9]
         bounds = ([1e-9, 0.5, 0, 1e-9, 0.5, 0], [1.0, 1.0, 1e7, 1.0, 1.0, 1e7])
         param_names = ["CPE1-T", "CPE1-P", "R1 (Ω)", "CPE2-T", "CPE2-P", "R2 (Ω)"]
         
@@ -183,7 +184,7 @@ def fit_uor_eis(f, zr, zi, model_type):
             Z_faradaic = 1.0 / (1.0/Rct + 1.0/Z_ind)
             Z_total = Rs_fixed + 1.0 / (1.0/Z_CPE + 1.0/Z_faradaic)
             return np.hstack([Z_total.real, -Z_total.imag])
-        p0 = [1e-4, 0.8, Rct_guess, Rct_guess*0.5, 1000]
+        p0 = [1e-4, 0.8, R_tot*1.5, R_tot*0.5, 1000]
         bounds = ([1e-9, 0.5, 0, 0, 1e-5], [1.0, 1.0, 1e7, 1e7, 1e8])
         param_names = ["CPE-T", "CPE-P", "Rct (Ω)", "RL (Ω)", "L (H)"]
         
@@ -196,7 +197,7 @@ def fit_uor_eis(f, zr, zi, model_type):
             Z_faradaic = Rct + Z_ind
             Z_total = Rs_fixed + 1.0 / (1.0/Z_CPE + 1.0/Z_faradaic)
             return np.hstack([Z_total.real, -Z_total.imag])
-        p0 = [1e-4, 0.8, Rct_guess, Rct_guess*0.5, 1000]
+        p0 = [1e-4, 0.8, R_tot, R_tot*0.5, 5000]
         bounds = ([1e-9, 0.5, 0, -1e7, 1e-5], [1.0, 1.0, 1e7, 1e7, 1e8])
         param_names = ["CPE-T", "CPE-P", "Rct (Ω)", "RL (Ω)", "L (H)"]
         
@@ -209,7 +210,7 @@ def fit_uor_eis(f, zr, zi, model_type):
             Z_faradaic = Rct + Z_ads
             Z_total = Rs_fixed + 1.0 / (1.0/Z_CPE1 + 1.0/Z_faradaic)
             return np.hstack([Z_total.real, -Z_total.imag])
-        p0 = [1e-5, 0.8, Rct_guess*0.5, 1e-3, 0.9, Rct_guess*0.5]
+        p0 = [1e-5, 0.8, R_tot*0.5, 1e-3, 0.9, R_tot*0.5]
         bounds = ([1e-9, 0.5, 0, 1e-9, 0.5, 0], [1.0, 1.0, 1e7, 1.0, 1.0, 1e7])
         param_names = ["CPE1-T", "CPE1-P", "Rct (Ω)", "CPE2-T", "CPE2-P", "Rads (Ω)"]
         
@@ -225,7 +226,8 @@ def fit_uor_eis(f, zr, zi, model_type):
             Z_2 = 1.0 / (1.0/Z_CPE2 + 1.0/Z_faradaic)
             Z_total = Rs_fixed + Z_1 + Z_2
             return np.hstack([Z_total.real, -Z_total.imag])
-        p0 = [1e-5, 0.8, Rct_guess*0.1, 1e-4, 0.8, Rct_guess*0.9, Rct_guess*0.5, 1000]
+        # Dynamic smart guess to avoid getting trapped in local minima
+        p0 = [1e-5, 0.8, R_tot*0.1, 1e-4, 0.8, R_tot*0.8, R_tot*0.3, 10000]
         bounds = ([1e-9, 0.5, 0, 1e-9, 0.5, 0, -1e7, 1e-5], [1.0, 1.0, 1e7, 1.0, 1.0, 1e7, 1e7, 1e8])
         param_names = ["CPE1-T", "CPE1-P", "R1 (Ω)", "CPE2-T", "CPE2-P", "Rct (Ω)", "RL (Ω)", "L (H)"]
 
@@ -240,7 +242,7 @@ def fit_uor_eis(f, zr, zi, model_type):
             Z_3 = 1.0 / (1.0/Z_CPE3 + 1.0/R3)
             Z_total = Rs_fixed + Z_1 + Z_2 + Z_3
             return np.hstack([Z_total.real, -Z_total.imag])
-        p0 = [1e-5, 0.8, Rct_guess*0.1, 1e-4, 0.8, Rct_guess*0.3, 1e-3, 0.8, Rct_guess*0.6]
+        p0 = [1e-5, 0.8, R_tot*0.05, 1e-4, 0.8, R_tot*0.35, 1e-3, 0.8, R_tot*0.6]
         bounds = ([1e-9, 0.5, 0, 1e-9, 0.5, 0, 1e-9, 0.5, 0], [1.0, 1.0, 1e7, 1.0, 1.0, 1e7, 1.0, 1.0, 1e7])
         param_names = ["CPE1-T", "CPE1-P", "R1 (Ω)", "CPE2-T", "CPE2-P", "R2 (Ω)", "CPE3-T", "CPE3-P", "R3 (Ω)"]
         
@@ -925,7 +927,6 @@ if uploaded_files:
                         
                         if is_sg_eis:
                             zr, zi, f_hz = tr["x"], tr["y"], tr["f"]
-                            # Scatter plots for experimental data
                             fig_super.add_trace(go.Scatter(x=zr, y=zi, mode='markers', name=tr["name"], marker=dict(color=c_color, size=6)))
                             
                             z_mod = np.sqrt(zr**2 + zi**2)
@@ -941,7 +942,6 @@ if uploaded_files:
                                     results_dict["Curve"] = tr["name"]
                                     results_dict["Model"] = selected_model.split(" [")[0] # clean name for table
                                     sg_eis_params.append(results_dict)
-                                    # Continuous smooth dashed line for fitting
                                     fig_super.add_trace(go.Scatter(x=zr_sim, y=zi_sim, mode='lines', line=dict(color=c_color, width=2, dash='dash'), showlegend=False, hoverinfo='skip'))
                                     z_mod_sim = np.sqrt(zr_sim**2 + zi_sim**2)
                                     phase_sim = np.degrees(np.arctan2(zi_sim, zr_sim))
