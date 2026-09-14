@@ -42,14 +42,14 @@ with st.popover("📖 View Calculation Methods & Algorithms"):
     *   **Equivalent Circuit Fitting:** Applies Non-Linear Least Squares (CNLS) with **Modulus Weighting** ($\\sigma = |Z|$) to ensure accurate fitting across all impedance magnitudes. Generates a high-density synthetic curve for continuous publication-ready lines. 
     *   **Frequency Cropping:** Allows discarding non-stationary low/high frequency data (e.g., gas bubble noise) that violates Kramers-Kronig validity before fitting.
     
-    **5. Chemical Speciation (Hydra/Medusa)**
+    **5. Chemical Speciation (Medusa)**
     *   Features a custom reverse-engineering algorithm that reads raw `.plt` vector files and maps screen coordinates back to chemical thermodynamic data (Log Conc / Fraction vs pH) to generate high-quality plots.
     """)
 
 st.markdown("---")
 
 # ============================================================
-# SIDEBAR SETUP (ALL CONTROLS)
+# SIDEBAR SETUP (ALL SETTINGS DECLARED FIRST)
 # ============================================================
 with st.sidebar:
     st.header("🎛️ Instrument Format")
@@ -131,32 +131,62 @@ with st.sidebar:
     components.html("""<button onclick="window.parent.print();" style="background-color:#FF4B4B; color:white; border:none; border-radius:4px; padding:0.5rem 1rem; font-size:1rem; font-weight:600; cursor:pointer; width:100%;">🖨️ Save Page as PDF</button>""", height=50)
     st.markdown("<div style='text-align: center; margin-top: 50px;'><p style='color: #888888; font-size: 0.85rem; font-family: sans-serif;'>Developed by<br><b>PhD(c) Carlos A. Torres-Ramírez</b><br><br></p></div>", unsafe_allow_html=True)
 
+# Define dynamic labels globally after variables are loaded
+i_axis_label = "Current, I (A)" if scientific_style else "I (A)"
+j_axis_label = "Current Density, j (mA cm⁻²)" if scientific_style else "Current Density j (mA/cm²)"
+
+publication_palette = ['#000000', '#E41A1C', '#377EB8', '#4DAF4A', '#984EA3', '#FF7F00', '#A65628', '#F781BF'] + px.colors.qualitative.Alphabet
+combined_palette = publication_palette
+dl_config = {'toImageButtonOptions': {'format': 'png', 'filename': 'electrochem_plot', 'height': 720, 'width': 960, 'scale': 4}}
+
 
 # ============================================================
-# UTILITIES & MATH
+# UTILITIES & MATH FUNCTIONS
 # ============================================================
+def to_rgba(color_str: str, alpha: float = 0.2) -> str:
+    color_str = color_str.strip().lower()
+    if color_str.startswith('#'):
+        h = color_str.lstrip('#')
+        if len(h) == 6:
+            return f"rgba({int(h[0:2], 16)}, {int(h[2:4], 16)}, {int(h[4:6], 16)}, {alpha})"
+    elif color_str.startswith('rgb('):
+        return color_str.replace('rgb(', 'rgba(').replace(')', f', {alpha})')
+    return f"rgba(150, 150, 150, {alpha})"
+
+def _to_float(x):
+    if x is None: return None
+    try: return float(str(x).replace(",", "."))
+    except: return None
+
+def mad_sigma(x: np.ndarray) -> float:
+    x = x[np.isfinite(x)]
+    if len(x) < 10: return float(np.std(x)) if len(x) else np.nan
+    med = np.median(x)
+    mad = np.median(np.abs(x - med))
+    return 1.4826 * mad if mad > 0 else float(np.std(x))
+
+def get_sr_from_name(name: str, default_sr: float) -> float:
+    m = re.search(r'(\d+\.?\d*)\s*mV/s', name, re.IGNORECASE)
+    if m: return float(m.group(1))
+    return default_sr if default_sr is not None else 0.0
 
 def get_averaged_curve(processed_curves: List[Tuple[str, pd.DataFrame]]) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     if not processed_curves: return None, None, None
     max_points = max(len(dd) for _, dd in processed_curves)
     common_idx = np.linspace(0, 1, max_points)
-    
     E_interp, I_interp = [], []
     for _, dd in processed_curves:
         idx = np.linspace(0, 1, len(dd))
         E_interp.append(np.interp(common_idx, idx, dd["x"].values))
         I_interp.append(np.interp(common_idx, idx, dd["y"].values))
-        
     return np.mean(E_interp, axis=0), np.mean(I_interp, axis=0), np.std(I_interp, axis=0)
 
 def get_averaged_eis_curve(processed_curves: List[Tuple[str, pd.DataFrame]]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     if not processed_curves: return None, None, None, None, None
-    
     all_f = np.concatenate([dd["f"].values for _, dd in processed_curves])
     min_f, max_f = np.min(all_f), np.max(all_f)
     max_points = max(len(dd) for _, dd in processed_curves)
     common_f = np.logspace(np.log10(max_f), np.log10(min_f), max_points)
-    
     Zr_interp, Zi_interp = [], []
     for _, dd in processed_curves:
         f_vals = dd["f"].values
@@ -164,10 +194,8 @@ def get_averaged_eis_curve(processed_curves: List[Tuple[str, pd.DataFrame]]) -> 
         f_sorted = f_vals[sort_idx]
         zr_sorted = dd["x"].values[sort_idx]
         zi_sorted = dd["y"].values[sort_idx]
-        
         Zr_interp.append(np.interp(common_f, f_sorted, zr_sorted))
         Zi_interp.append(np.interp(common_f, f_sorted, zi_sorted))
-        
     return common_f[::-1], np.mean(Zr_interp, axis=0)[::-1], np.mean(Zi_interp, axis=0)[::-1], np.std(Zr_interp, axis=0)[::-1], np.std(Zi_interp, axis=0)[::-1]
 
 # --- EIS FITTING MODEL ---
@@ -186,7 +214,7 @@ def fit_uor_eis(f, zr, zi, model_type):
     y_data = np.hstack([zr, zi])
     Z_data = zr - 1j * zi
     abs_Z = np.abs(Z_data)
-    sigma = np.hstack([abs_Z, abs_Z]) 
+    sigma = np.hstack([abs_Z, abs_Z])
     
     Rs_fixed = np.min(zr)
     R_tot = np.abs(np.max(zr) - Rs_fixed)
@@ -882,7 +910,6 @@ def convert_df_to_excel(curves_list: List[Tuple[str, pd.DataFrame]]) -> bytes:
             elif "Time" in df.columns and "Vf" in df.columns:
                 clean_df = df.replace([np.inf, -np.inf], np.nan).dropna(subset=["Time", "Vf"])
             elif "x" in df.columns and "y" in df.columns:
-                # Custom handler for Medusa curves
                 clean_df = df.replace([np.inf, -np.inf], np.nan).dropna(subset=["x", "y"])
             else:
                 Ecol = "Vf" if "Vf" in df.columns else ("Vu" if "Vu" in df.columns else None)
@@ -900,23 +927,16 @@ def convert_df_to_excel(curves_list: List[Tuple[str, pd.DataFrame]]) -> bytes:
                 clean_df.to_excel(writer, index=False, sheet_name=safe_name)
                 sheets_written += 1
                 
-        # Safety fallback to prevent IndexError if no valid numeric data was found
         if sheets_written == 0:
-            pd.DataFrame({"Message": ["No parseable data found for Excel export"]}).to_excel(writer, index=False, sheet_name="Empty")
+            pd.DataFrame({"Message": ["No parseable data found"]}).to_excel(writer, index=False, sheet_name="Empty")
             
     return output.getvalue()
 
+
 # ============================================================
-# APP UPLOADER & MAIN LOGIC
+# APP MAIN LOGIC & PLOTTING
 # ============================================================
 uploaded_files = st.file_uploader("Upload CV/LSV/CP/EIS or Medusa (.plt) files", type=["csv", "CSV", "DTA", "dta", "mpt", "MPT", "txt", "TXT", "plt", "PLT"], accept_multiple_files=True)
-
-publication_palette = ['#000000', '#E41A1C', '#377EB8', '#4DAF4A', '#984EA3', '#FF7F00', '#A65628', '#F781BF'] + px.colors.qualitative.Alphabet
-combined_palette = publication_palette
-dl_config = {'toImageButtonOptions': {'format': 'png', 'filename': 'electrochem_plot', 'height': 720, 'width': 960, 'scale': 4}}
-
-i_axis_label = "Current, I (A)" if scientific_style else "I (A)"
-j_axis_label = "Current Density, j (mA cm⁻²)" if scientific_style else "Current Density j (mA/cm²)"
 
 if uploaded_files:
     file_dict = {f.name: f for f in uploaded_files}
