@@ -756,39 +756,8 @@ def convert_df_to_excel(curves_list: List[Tuple[str, pd.DataFrame]]) -> bytes:
     return output.getvalue()
 
 # ============================================================
-# APP UPLOADER & SIDEBAR (BOTTOM AREA)
+# APP SIDEBAR CONTROLS
 # ============================================================
-uploaded_files = st.file_uploader("Upload CV/LSV/CP/EIS or Medusa (tabular) files", type=["csv", "CSV", "DTA", "dta", "mpt", "MPT", "txt", "TXT"], accept_multiple_files=True)
-
-if uploaded_files:
-    file_dict = {f.name: f for f in uploaded_files}
-    display_names = set([f"⋮⋮ {name}" for name in file_dict.keys()])
-    
-    if 'file_groups' not in st.session_state: st.session_state.file_groups = [{"header": "📥 Unassigned Files", "items": []}, {"header": "📊 Group 1", "items": []}]
-    for group in st.session_state.file_groups: group["items"] = [item for item in group["items"] if item in display_names]
-    existing_items = set([item for group in st.session_state.file_groups for item in group["items"]])
-    new_items = display_names - existing_items
-    if new_items: st.session_state.file_groups[0]["items"].extend(list(new_items))
-
-    with st.sidebar:
-        st.markdown("---")
-        st.header("🗂️ Drag & Drop Groups")
-        c1, c2 = st.columns(2)
-        if c1.button("➕ Add Group"): st.session_state.file_groups.append({"header": f"📊 Group {len(st.session_state.file_groups)}", "items": []}); st.rerun()
-        if c2.button("➖ Remove Group") and len(st.session_state.file_groups) > 1:
-            st.session_state.file_groups[0]["items"].extend(st.session_state.file_groups[-1]["items"])
-            st.session_state.file_groups.pop(); st.rerun()
-        unassigned_count = len(st.session_state.file_groups[0]["items"])
-        if unassigned_count > 0 and len(st.session_state.file_groups) > 1:
-            bc1, bc2 = st.columns([2, 1])
-            with bc1: target_g = st.selectbox("Target", [g["header"] for g in st.session_state.file_groups[1:]], label_visibility="collapsed")
-            with bc2:
-                if st.button("Move All"):
-                    for g in st.session_state.file_groups:
-                        if g["header"] == target_g:
-                            g["items"].extend(st.session_state.file_groups[0]["items"]); st.session_state.file_groups[0]["items"] = []; st.rerun()
-        st.session_state.file_groups = sort_items(st.session_state.file_groups, multi_containers=True)
-
 with st.sidebar:
     st.markdown("---")
     st.header("⚡ iR Drop Compensation")
@@ -857,6 +826,11 @@ with st.sidebar:
     components.html("""<button onclick="window.parent.print();" style="background-color:#FF4B4B; color:white; border:none; border-radius:4px; padding:0.5rem 1rem; font-size:1rem; font-weight:600; cursor:pointer; width:100%;">🖨️ Save Page as PDF</button>""", height=50)
     st.markdown("<div style='text-align: center; margin-top: 50px;'><p style='color: #888888; font-size: 0.85rem; font-family: sans-serif;'>Developed by<br><b>PhD(c) Carlos A. Torres-Ramírez</b><br><br></p></div>", unsafe_allow_html=True)
 
+# ============================================================
+# APP UPLOADER & MAIN LOGIC
+# ============================================================
+uploaded_files = st.file_uploader("Upload CV/LSV/CP/EIS or Medusa (tabular) files", type=["csv", "CSV", "DTA", "dta", "mpt", "MPT", "txt", "TXT"], accept_multiple_files=True)
+
 publication_palette = ['#000000', '#E41A1C', '#377EB8', '#4DAF4A', '#984EA3', '#FF7F00', '#A65628', '#F781BF'] + px.colors.qualitative.Alphabet
 combined_palette = publication_palette
 dl_config = {'toImageButtonOptions': {'format': 'png', 'filename': 'electrochem_plot', 'height': 720, 'width': 960, 'scale': 4}}
@@ -865,6 +839,34 @@ i_axis_label = "Current, I (A)" if scientific_style else "I (A)"
 j_axis_label = "Current Density, j (mA cm⁻²)" if scientific_style else "Current Density j (mA/cm²)"
 
 if uploaded_files:
+    file_dict = {f.name: f for f in uploaded_files}
+    display_names = set([f"⋮⋮ {name}" for name in file_dict.keys()])
+    
+    if 'file_groups' not in st.session_state: st.session_state.file_groups = [{"header": "📥 Unassigned Files", "items": []}, {"header": "📊 Group 1", "items": []}]
+    for group in st.session_state.file_groups: group["items"] = [item for item in group["items"] if item in display_names]
+    existing_items = set([item for group in st.session_state.file_groups for item in group["items"]])
+    new_items = display_names - existing_items
+    if new_items: st.session_state.file_groups[0]["items"].extend(list(new_items))
+
+    with st.sidebar:
+        st.markdown("---")
+        st.header("🗂️ Drag & Drop Groups")
+        c1, c2 = st.columns(2)
+        if c1.button("➕ Add Group"): st.session_state.file_groups.append({"header": f"📊 Group {len(st.session_state.file_groups)}", "items": []}); st.rerun()
+        if c2.button("➖ Remove Group") and len(st.session_state.file_groups) > 1:
+            st.session_state.file_groups[0]["items"].extend(st.session_state.file_groups[-1]["items"])
+            st.session_state.file_groups.pop(); st.rerun()
+        unassigned_count = len(st.session_state.file_groups[0]["items"])
+        if unassigned_count > 0 and len(st.session_state.file_groups) > 1:
+            bc1, bc2 = st.columns([2, 1])
+            with bc1: target_g = st.selectbox("Target", [g["header"] for g in st.session_state.file_groups[1:]], label_visibility="collapsed")
+            with bc2:
+                if st.button("Move All"):
+                    for g in st.session_state.file_groups:
+                        if g["header"] == target_g:
+                            g["items"].extend(st.session_state.file_groups[0]["items"]); st.session_state.file_groups[0]["items"] = []; st.rerun()
+        st.session_state.file_groups = sort_items(st.session_state.file_groups, multi_containers=True)
+
     prepared_group_data = {}
     valid_groups_for_super = []
     
@@ -1058,7 +1060,6 @@ if uploaded_files:
                                     results_dict["Curve"] = tr["name"]
                                     results_dict["Model"] = selected_model.split(" [")[0] # clean name for table
                                     sg_eis_params.append(results_dict)
-                                    # Solid lines, explicit legend
                                     fig_super.add_trace(go.Scatter(x=zr_sim, y=zi_sim, mode='lines', name=f"{tr['name']} Model", line=dict(color=c_color, width=2), showlegend=True, hoverinfo='skip'))
                                     z_mod_sim = np.sqrt(zr_sim**2 + zi_sim**2)
                                     phase_sim = np.degrees(np.arctan2(zi_sim, zr_sim))
@@ -1172,13 +1173,17 @@ if uploaded_files:
                     if is_sg_lsv:
                         c1, c2 = st.columns(2)
                         with c1:
-                            fig_super_jeta.update_layout(title="", xaxis_title="Overpotential η (mV)", yaxis_title=j_axis_label, height=500)
+                            fig_super_jeta.update_layout(title="Catalytic Performance" if not scientific_style else "", xaxis_title="Overpotential η (mV)", yaxis_title=j_axis_label, height=500)
                             fig_super_jeta = apply_scientific_style(fig_super_jeta, scientific_style, lx, ly, lxa, lya)
                             st.plotly_chart(fig_super_jeta, use_container_width=True, config=dl_config)
                         with c2:
-                            fig_super_tafel.update_layout(title="", xaxis_title="log₁₀|I| (A)", yaxis_title=x_axis_label, xaxis=dict(range=[sg_max_log_I - 4.5, sg_max_log_I + 0.2]), height=500)
+                            fig_super_tafel.update_layout(title="Tafel Plot" if not scientific_style else "", xaxis_title="log₁₀|I| (A)", yaxis_title=x_axis_label, xaxis=dict(range=[sg_max_log_I - 4.5, sg_max_log_I + 0.2]), height=500)
                             fig_super_tafel = apply_scientific_style(fig_super_tafel, scientific_style, lx, ly, lxa, lya)
                             st.plotly_chart(fig_super_tafel, use_container_width=True, config=dl_config)
+                            
+                        if sg_lsv_params:
+                            st.markdown("#### 🧪 Catalytic Parameters (LSV)")
+                            st.dataframe(pd.DataFrame(sg_lsv_params), use_container_width=True)
                             
                     elif len(sg_cv_kinetics) > 1:
                         st.markdown("#### 🔋 CV Kinetics ($b$-value Determination)")
