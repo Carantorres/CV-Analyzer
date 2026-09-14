@@ -44,6 +44,7 @@ with st.popover("📖 View Calculation Methods & Algorithms"):
     **5. Electrochemical Impedance Spectroscopy (EIS)**
     *   **Nyquist & Bode Plots:** Renders $-Z''$ vs $Z'$ (1:1 ratio), Bode $|Z|$, and Bode Phase natively.
     *   **Equivalent Circuit Fitting:** Applies Non-Linear Least Squares (CNLS) with **Modulus Weighting** ($\\sigma = |Z|$) to ensure accurate fitting across all impedance magnitudes. Generates a high-density synthetic curve for continuous publication-ready lines. Supports 8 different literature-backed UOR models with dynamic initial parameter estimation for robust convergence on complex multi-loop systems.
+    *   **Frequency Cropping:** Allows discarding non-stationary low/high frequency data (e.g., gas bubble noise) that violates Kramers-Kronig validity before fitting.
     """)
 
 st.markdown("---")
@@ -226,7 +227,6 @@ def fit_uor_eis(f, zr, zi, model_type):
             Z_2 = 1.0 / (1.0/Z_CPE2 + 1.0/Z_faradaic)
             Z_total = Rs_fixed + Z_1 + Z_2
             return np.hstack([Z_total.real, -Z_total.imag])
-        # Dynamic smart guess to avoid getting trapped in local minima
         p0 = [1e-5, 0.8, R_tot*0.1, 1e-4, 0.8, R_tot*0.8, R_tot*0.3, 10000]
         bounds = ([1e-9, 0.5, 0, 1e-9, 0.5, 0, -1e7, 1e-5], [1.0, 1.0, 1e7, 1.0, 1.0, 1e7, 1e7, 1e8])
         param_names = ["CPE1-T", "CPE1-P", "R1 (Ω)", "CPE2-T", "CPE2-P", "Rct (Ω)", "RL (Ω)", "L (H)"]
@@ -738,6 +738,16 @@ with st.sidebar:
         with c_max: peak_max_v = st.number_input("Max E (V)", value=0.60, step=0.05)
     else:
         peak_min_v, peak_max_v = None, None
+        
+    st.markdown("---")
+    st.header("✂️ EIS Frequency Cropping")
+    crop_eis = st.toggle("Limit Frequency Range", value=False, help="Discard noisy data at very low or high frequencies before fitting (e.g. gas bubble noise at low Hz).")
+    if crop_eis:
+        c_fmin, c_fmax = st.columns(2)
+        with c_fmin: eis_min_f = st.number_input("Min Freq (Hz)", value=0.05, format="%.3f")
+        with c_fmax: eis_max_f = st.number_input("Max Freq (Hz)", value=100000.0, step=1000.0)
+    else:
+        eis_min_f, eis_max_f = 1e-9, 1e9
 
     st.markdown("---")
     st.header("🎨 Plot Formatting")
@@ -825,6 +835,8 @@ if uploaded_files:
                     if "Z_real" in df_comp.columns and "neg_Z_imag" in df_comp.columns:
                         dd_comp = df_comp[["Z_real", "neg_Z_imag", "Frequency"]].replace([np.inf, -np.inf], np.nan).dropna().copy()
                         dd_comp.columns = ["x", "y", "f"]
+                        # Apply Frequency Crop Here
+                        dd_comp = dd_comp[(dd_comp["f"] >= eis_min_f) & (dd_comp["f"] <= eis_max_f)]
                         if len(dd_comp) >= 5: processed_curves.append((cid, dd_comp))
                 else:
                     Ecol = "Vf" if "Vf" in df_comp.columns else ("Vu" if "Vu" in df_comp.columns else None)
@@ -927,6 +939,7 @@ if uploaded_files:
                         
                         if is_sg_eis:
                             zr, zi, f_hz = tr["x"], tr["y"], tr["f"]
+                            # Scatter plots for experimental data
                             fig_super.add_trace(go.Scatter(x=zr, y=zi, mode='markers', name=tr["name"], marker=dict(color=c_color, size=6)))
                             
                             z_mod = np.sqrt(zr**2 + zi**2)
@@ -942,6 +955,7 @@ if uploaded_files:
                                     results_dict["Curve"] = tr["name"]
                                     results_dict["Model"] = selected_model.split(" [")[0] # clean name for table
                                     sg_eis_params.append(results_dict)
+                                    # Continuous smooth dashed line for fitting
                                     fig_super.add_trace(go.Scatter(x=zr_sim, y=zi_sim, mode='lines', line=dict(color=c_color, width=2, dash='dash'), showlegend=False, hoverinfo='skip'))
                                     z_mod_sim = np.sqrt(zr_sim**2 + zi_sim**2)
                                     phase_sim = np.degrees(np.arctan2(zi_sim, zr_sim))
@@ -1121,6 +1135,8 @@ if uploaded_files:
                 if "Z_real" in dfi.columns and "neg_Z_imag" in dfi.columns:
                     dd = dfi[["Z_real", "neg_Z_imag", "Frequency"]].replace([np.inf, -np.inf], np.nan).dropna().copy()
                     dd.columns = ["x", "y", "f"]
+                    # Apply Frequency Crop Here
+                    dd = dd[(dd["f"] >= eis_min_f) & (dd["f"] <= eis_max_f)]
                     if len(dd) >= 5: processed_curves.append((cid, dd))
             else:
                 Ecol = "Vf" if "Vf" in dfi.columns else ("Vu" if "Vu" in dfi.columns else None)
