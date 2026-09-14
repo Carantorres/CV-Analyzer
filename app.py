@@ -457,7 +457,7 @@ def parse_gamry_dta_multi_curve(raw: str) -> Tuple[Dict[str, str], List[Tuple[st
     meta: Dict[str, str] = {}
     first_curve_idx = None
     for i, line in enumerate(lines):
-        if re.match(r"^\s*CURVE\d*\s+TABLE\b", line, flags=re.IGNORECASE) or line.strip().upper().startswith("CURVE"):
+        if "CURVE" in line.upper() and "TABLE" in line.upper():
             first_curve_idx = i; break
         if "\t" in line:
             parts = line.split("\t")
@@ -473,41 +473,74 @@ def parse_gamry_dta_multi_curve(raw: str) -> Tuple[Dict[str, str], List[Tuple[st
     i = first_curve_idx
     while i < len(lines):
         line = lines[i]
-        m = re.match(r"^\s*CURVE(\d*)\s+TABLE\b(?:\s+(\d+))?", line, flags=re.IGNORECASE)
-        if not m:
-            i += 1; continue
-        curve_id = f"Curve {m.group(1) if m.group(1) else '1'}" 
+        if "CURVE" in line.upper() and "TABLE" in line.upper():
+            m = re.search(r"(Z?CURVE)(\d*)", line, flags=re.IGNORECASE)
+            curve_id = f"Curve {m.group(2) if m and m.group(2) else '1'}" 
 
-        j, col_line_idx = i + 1, None
-        while j < len(lines) and j < i + 60:
-            s = lines[j].strip()
-            if ("Pt" in s and "Im" in s and ("Vf" in s or "Vu" in s)): col_line_idx = j; break
-            j += 1
+            j, col_line_idx = i + 1, None
+            while j < len(lines) and j < i + 60:
+                s = lines[j].strip()
+                parts = s.split("\t")
+                if len(parts) >= 3 and any(c.upper() in ["PT", "V", "I", "FREQ", "ZREAL", "T", "TIME", "VF", "VU", "IM"] for c in parts):
+                    col_line_idx = j; break
+                j += 1
 
-        if col_line_idx is None: raise ValueError(f"No pude ubicar encabezado de columnas para {curve_id}.")
-        cols = [c.strip() for c in lines[col_line_idx].split("\t") if c.strip()]
-        if len(cols) < 3: cols = [c.strip() for c in re.split(r"\s{2,}", lines[col_line_idx].strip()) if c.strip()]
+            if col_line_idx is None: 
+                i += 1; continue
 
-        data_start = col_line_idx + 1
-        if data_start < len(lines) and lines[data_start].lstrip().startswith("#"): data_start += 1
-        rows: List[List[str]] = []
-        k = data_start
-        while k < len(lines):
-            s = lines[k].strip()
-            if not s:
-                k += 1; continue
-            if re.match(r"^\s*CURVE\d*\s+TABLE\b", s, flags=re.IGNORECASE): break
-            parts = [p.strip() for p in lines[k].split("\t")]
-            if len(parts) == 1: parts = [p.strip() for p in re.split(r"\s{2,}", s)]
-            if parts and parts[0] == "": parts = parts[1:]
-            if len(parts) >= len(cols): rows.append(parts[:len(cols)])
-            k += 1
+            cols = [c.strip() for c in lines[col_line_idx].split("\t") if c.strip()]
+            if len(cols) < 3: cols = [c.strip() for c in re.split(r"\s{2,}", lines[col_line_idx].strip()) if c.strip()]
 
-        df = pd.DataFrame(rows, columns=cols)
-        for c in df.columns: df[c] = pd.to_numeric(df[c].astype(str).str.replace(",", ".", regex=False).str.strip(), errors="coerce")
-        df = df.replace([np.inf, -np.inf], np.nan).dropna(how="all").reset_index(drop=True)
-        curves.append((curve_id, df))
-        i = k
+            data_start = col_line_idx + 1
+            if data_start < len(lines) and lines[data_start].lstrip().startswith("#"): data_start += 1
+            rows: List[List[str]] = []
+            k = data_start
+            while k < len(lines):
+                s = lines[k].strip()
+                if not s:
+                    k += 1; continue
+                if "CURVE" in s.upper() and "TABLE" in s.upper(): break
+                parts = [p.strip() for p in lines[k].split("\t")]
+                if len(parts) == 1: parts = [p.strip() for p in re.split(r"\s{2,}", s)]
+                if parts and parts[0] == "": parts = parts[1:]
+                if len(parts) >= len(cols): rows.append(parts[:len(cols)])
+                k += 1
+
+            df = pd.DataFrame(rows, columns=cols)
+            for c in df.columns: df[c] = pd.to_numeric(df[c].astype(str).str.replace(",", ".", regex=False).str.strip(), errors="coerce")
+            df = df.replace([np.inf, -np.inf], np.nan).dropna(how="all").reset_index(drop=True)
+            
+            # Rename columns to standardized app format
+            col_map = {}
+            for c in df.columns:
+                cu = c.upper()
+                if cu in ["VF", "VU", "VM", "V"]: col_map[c] = "Vf"
+                elif cu in ["IM", "I"]: col_map[c] = "Im"
+                elif cu in ["FREQ", "FREQUENCY"]: col_map[c] = "Frequency"
+                elif cu in ["ZREAL", "Z'"]: col_map[c] = "Z_real"
+                elif cu in ["ZIMAG", "Z''"]: col_map[c] = "neg_Z_imag"
+                elif cu in ["T", "TIME"]: col_map[c] = "Time"
+            df = df.rename(columns=col_map)
+
+            # Fix Gamry native Zimag (which is strictly imaginary, we want it inverted for standard Nyquist)
+            if "neg_Z_imag" in df.columns and any("Zimag" in c for c in cols):
+                df["neg_Z_imag"] = -df["neg_Z_imag"]
+                
+            curves.append((curve_id, df))
+            i = k
+        else:
+            i += 1
+            
+    method = meta.get("METHOD", "").upper()
+    if "IMP" in method or "EIS" in method or (curves and "Frequency" in curves[0][1].columns):
+        meta["TECHNIQUE"] = "Electrochemical Impedance Spectroscopy (EIS)"
+    elif "CP" in method or "CHRONOP" in method or (curves and "Time" in curves[0][1].columns and "Im" not in curves[0][1].columns):
+        meta["TECHNIQUE"] = "Chronopotentiometry (CP)"
+    elif "CV" in method or "CYCLIC" in method:
+        meta["TECHNIQUE"] = "Cyclic Voltammetry (CV)"
+    elif "LSV" in method or "LINEAR" in method:
+        meta["TECHNIQUE"] = "Linear Sweep Voltammetry (LSV)"
+        
     return meta, curves
 
 def parse_biologic_mpt(raw: str):
@@ -543,10 +576,8 @@ def parse_biologic_mpt(raw: str):
         for col_list in [line_minus_2, line_minus_1]:
             for c in col_list:
                 cl = c.lower()
-                if "ewe" in cl or "potential" in cl:
-                    if len(cols) > 2: cols[2] = c
-                if "<i>" in cl or "current" in cl:
-                    if len(cols) > 3: cols[3] = c
+                if "ewe" in cl or "potential" in cl or "v" == cl: cols[cols.index(c)] = c
+                if "<i>" in cl or "current" in cl or "i" == cl: cols[cols.index(c)] = c
 
     rows = []
     for line in data_lines:
@@ -570,12 +601,20 @@ def parse_biologic_mpt(raw: str):
     col_map = {}
     for c in df.columns:
         cl = c.lower()
-        if "ewe" in cl or "potential" in cl or "voltage" in cl: col_map[c] = "Vf"
-        elif "<i>" in cl or "current" in cl or "i/ma" in cl: col_map[c] = "Im"
+        if "ewe" in cl or "potential" in cl or "voltage" in cl or "v" == cl: col_map[c] = "Vf"
+        elif "<i>" in cl or "current" in cl or "i/ma" in cl or "i" == cl: col_map[c] = "Im"
         elif cl == "cycle number" or cl == "cycle": col_map[c] = "Cycle"
+        elif "freq" in cl: col_map[c] = "Frequency"
+        elif "re(z)" in cl or "z'" in cl: col_map[c] = "Z_real"
+        elif "-im(z)" in cl or "-z''" in cl: col_map[c] = "neg_Z_imag"
+        elif "im(z)" in cl or "z''" in cl: col_map[c] = "z_imag"
+        elif "time" in cl or "t/s" in cl: col_map[c] = "Time"
     df = df.rename(columns=col_map)
-    if "Vf" not in df.columns or "Im" not in df.columns: return meta, []
-    if df["Im"].abs().max() > 1: df["Im"] = df["Im"] / 1000
+    
+    if "z_imag" in df.columns and "neg_Z_imag" not in df.columns:
+        df["neg_Z_imag"] = -df["z_imag"]
+        
+    if "Im" in df.columns and df["Im"].abs().max() > 1: df["Im"] = df["Im"] / 1000
 
     curves = []
     if "Cycle" in df.columns:
@@ -583,6 +622,11 @@ def parse_biologic_mpt(raw: str):
             df_cyc = df[df["Cycle"] == cyc].copy()
             if len(df_cyc) > 0: curves.append((f"Cycle {int(cyc) if float(cyc).is_integer() else cyc}", df_cyc.reset_index(drop=True)))
     else: curves.append(("Curve 1", df))
+    
+    if "Frequency" in df.columns and "Z_real" in df.columns: meta["TECHNIQUE"] = "Electrochemical Impedance Spectroscopy (EIS)"
+    elif "Time" in df.columns and "Vf" in df.columns and "Im" not in df.columns: meta["TECHNIQUE"] = "Chronopotentiometry (CP)"
+    elif "Vf" in df.columns and "Im" in df.columns: meta["TECHNIQUE"] = "Cyclic Voltammetry (CV)"
+    
     return meta, curves
 
 def parse_pstrace_csv(raw: bytes) -> Tuple[Dict[str, str], List[Tuple[str, pd.DataFrame]]]:
@@ -756,7 +800,7 @@ def convert_df_to_excel(curves_list: List[Tuple[str, pd.DataFrame]]) -> bytes:
     return output.getvalue()
 
 # ============================================================
-# APP SIDEBAR CONTROLS
+# APP UPLOADER & MAIN LOGIC
 # ============================================================
 with st.sidebar:
     st.markdown("---")
@@ -826,9 +870,6 @@ with st.sidebar:
     components.html("""<button onclick="window.parent.print();" style="background-color:#FF4B4B; color:white; border:none; border-radius:4px; padding:0.5rem 1rem; font-size:1rem; font-weight:600; cursor:pointer; width:100%;">🖨️ Save Page as PDF</button>""", height=50)
     st.markdown("<div style='text-align: center; margin-top: 50px;'><p style='color: #888888; font-size: 0.85rem; font-family: sans-serif;'>Developed by<br><b>PhD(c) Carlos A. Torres-Ramírez</b><br><br></p></div>", unsafe_allow_html=True)
 
-# ============================================================
-# APP UPLOADER & MAIN LOGIC
-# ============================================================
 uploaded_files = st.file_uploader("Upload CV/LSV/CP/EIS or Medusa (tabular) files", type=["csv", "CSV", "DTA", "dta", "mpt", "MPT", "txt", "TXT"], accept_multiple_files=True)
 
 publication_palette = ['#000000', '#E41A1C', '#377EB8', '#4DAF4A', '#984EA3', '#FF7F00', '#A65628', '#F781BF'] + px.colors.qualitative.Alphabet
@@ -889,7 +930,6 @@ if uploaded_files:
                     if instrument.startswith("Gamry"): meta_sg, curves_comp = parse_gamry_dta_multi_curve(raw_str)
                     else: meta_sg, curves_comp = parse_biologic_mpt(raw_str)
                 except Exception as e:
-                    st.error(f"Error parsing {fname} with {instrument}: {e}")
                     pass
             
             tech_sg = meta_sg.get("TECHNIQUE", "")
@@ -1060,6 +1100,7 @@ if uploaded_files:
                                     results_dict["Curve"] = tr["name"]
                                     results_dict["Model"] = selected_model.split(" [")[0] # clean name for table
                                     sg_eis_params.append(results_dict)
+                                    # Solid continuous lines for the fitting model
                                     fig_super.add_trace(go.Scatter(x=zr_sim, y=zi_sim, mode='lines', name=f"{tr['name']} Model", line=dict(color=c_color, width=2), showlegend=True, hoverinfo='skip'))
                                     z_mod_sim = np.sqrt(zr_sim**2 + zi_sim**2)
                                     phase_sim = np.degrees(np.arctan2(zi_sim, zr_sim))
@@ -1173,11 +1214,11 @@ if uploaded_files:
                     if is_sg_lsv:
                         c1, c2 = st.columns(2)
                         with c1:
-                            fig_super_jeta.update_layout(title="Catalytic Performance" if not scientific_style else "", xaxis_title="Overpotential η (mV)", yaxis_title=j_axis_label, height=500)
+                            fig_super_jeta.update_layout(title="", xaxis_title="Overpotential η (mV)", yaxis_title=j_axis_label, height=500)
                             fig_super_jeta = apply_scientific_style(fig_super_jeta, scientific_style, lx, ly, lxa, lya)
                             st.plotly_chart(fig_super_jeta, use_container_width=True, config=dl_config)
                         with c2:
-                            fig_super_tafel.update_layout(title="Tafel Plot" if not scientific_style else "", xaxis_title="log₁₀|I| (A)", yaxis_title=x_axis_label, xaxis=dict(range=[sg_max_log_I - 4.5, sg_max_log_I + 0.2]), height=500)
+                            fig_super_tafel.update_layout(title="", xaxis_title="log₁₀|I| (A)", yaxis_title=x_axis_label, xaxis=dict(range=[sg_max_log_I - 4.5, sg_max_log_I + 0.2]), height=500)
                             fig_super_tafel = apply_scientific_style(fig_super_tafel, scientific_style, lx, ly, lxa, lya)
                             st.plotly_chart(fig_super_tafel, use_container_width=True, config=dl_config)
                             
@@ -1224,7 +1265,6 @@ if uploaded_files:
                 if instrument.startswith("Gamry"): meta, curves = parse_gamry_dta_multi_curve(raw_str)
                 else: meta, curves = parse_biologic_mpt(raw_str)
             except Exception as e:
-                st.error(f"Error parsing {file_name} with {instrument}: {e}")
                 pass
             
         technique = meta.get("TECHNIQUE", "Unknown Technique")
