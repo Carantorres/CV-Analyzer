@@ -43,7 +43,7 @@ with st.popover("📖 View Calculation Methods & Algorithms"):
     
     **5. Electrochemical Impedance Spectroscopy (EIS)**
     *   **Nyquist & Bode Plots:** Renders $-Z''$ vs $Z'$ (1:1 ratio), Bode $|Z|$, and Bode Phase natively.
-    *   **UOR Equivalent Circuit Fitting:** Applies Non-Linear Least Squares (CNLS) to fit the specific UOR model: `Rs-(CPE1||(Rct+(RL||L)))` including an inductive relaxation loop.
+    *   **UOR Equivalent Circuit Fitting:** Applies Non-Linear Least Squares (CNLS) to fit the specific UOR model: `Rs-(CPE1||(Rct||(RL+L)))` which features an inductive adsorption branch in parallel to the charge transfer resistance. The fit is plotted as a high-density continuous simulated curve over the experimental scatter points.
     """)
 
 st.markdown("---")
@@ -120,46 +120,47 @@ def get_averaged_eis_curve(processed_curves: List[Tuple[str, pd.DataFrame]]) -> 
         
     return common_f[::-1], np.mean(Zr_interp, axis=0)[::-1], np.mean(Zi_interp, axis=0)[::-1], np.std(Zr_interp, axis=0)[::-1], np.std(Zi_interp, axis=0)[::-1]
 
-# --- EIS FITTING MODEL ---
-def eis_model_obj(f, Rs, CPE_T, CPE_P, Rct, RL, L):
-    w = 2 * np.pi * f
-    Z_CPE = 1.0 / (CPE_T * (1j * w)**CPE_P)
-    Z_L = 1j * w * L
-    Z_ind = 1.0 / (1.0/RL + 1.0/Z_L)
-    Z_faradaic = Rct + Z_ind
-    Z_total = Rs + 1.0 / (1.0/Z_CPE + 1.0/Z_faradaic)
-    return np.hstack([Z_total.real, -Z_total.imag])
-
+# --- EIS FITTING MODEL (Smooth Curve & Adsorption Branch in Parallel) ---
 def fit_uor_eis(f, zr, zi):
     y_data = np.hstack([zr, zi])
     Z_data = zr - 1j * zi
     Rs_fixed = np.min(zr) 
     
-    def obj_func_fixed(f_val, CPE_T, CPE_P, Rct, RL, L):
-        return eis_model_obj(f_val, Rs_fixed, CPE_T, CPE_P, Rct, RL, L)
+    # Model: Rs + (CPE || (Rct || (RL + L))) 
+    def eis_model_obj(f_val, CPE_T, CPE_P, Rct, RL, L):
+        w = 2 * np.pi * f_val
+        Z_CPE = 1.0 / (CPE_T * (1j * w)**CPE_P)
+        Z_L = 1j * w * L
+        Z_ind = RL + Z_L
+        Z_faradaic = 1.0 / (1.0/Rct + 1.0/Z_ind)
+        Z_total = Rs_fixed + 1.0 / (1.0/Z_CPE + 1.0/Z_faradaic)
+        return np.hstack([Z_total.real, -Z_total.imag])
         
     p0 = [1e-4, 0.8, np.abs(np.max(zr)-np.min(zr)), np.abs(np.max(zr)-np.min(zr))*0.5, 1000]
-    bounds = ([1e-9, 0.5, 0, -1e6, 1e-5], [1.0, 1.0, 1e6, 1e6, 1e8])
+    bounds = ([1e-9, 0.5, 0, 0, 1e-5], [1.0, 1.0, 1e6, 1e6, 1e8])
     
     try:
-        popt, pcov = curve_fit(obj_func_fixed, f, y_data, p0=p0, bounds=bounds, maxfev=100000)
-        Z_fit_arr = eis_model_obj(f, Rs_fixed, *popt)
+        popt, pcov = curve_fit(eis_model_obj, f, y_data, p0=p0, bounds=bounds, maxfev=100000)
+        
+        # Original points for R2 / Chi2 calc
+        Z_fit_raw = eis_model_obj(f, *popt)
         N = len(f)
-        Z_fit_real = Z_fit_arr[:N]
-        Z_fit_imag = Z_fit_arr[N:]
+        Z_fit_complex = Z_fit_raw[:N] - 1j * Z_fit_raw[N:]
         
         SStot = np.sum((y_data - np.mean(y_data))**2)
-        SSres = np.sum((y_data - Z_fit_arr)**2)
+        SSres = np.sum((y_data - Z_fit_raw)**2)
         R2 = 1 - (SSres / SStot)
         
         weights = np.abs(Z_data)**2
-        Z_fit_complex = Z_fit_real - 1j*Z_fit_imag
         chi2 = np.sum((np.abs(Z_data - Z_fit_complex)**2) / weights) / (len(f) - 5)
         
-        errs = np.sqrt(np.diag(pcov))
-        rel_errs = (errs / np.abs(popt)) * 100
+        # Dense simulation for plotting smooth lines
+        f_sim = np.logspace(np.log10(np.max(f)), np.log10(np.min(f)), 200)
+        Z_sim_raw = eis_model_obj(f_sim, *popt)
+        Z_sim_real = Z_sim_raw[:200]
+        Z_sim_imag = Z_sim_raw[200:]
         
-        return [Rs_fixed] + list(popt), [0.0] + list(rel_errs), R2, chi2, Z_fit_real, Z_fit_imag
+        return [Rs_fixed] + list(popt), R2, chi2, f_sim, Z_sim_real, Z_sim_imag
     except Exception as e:
         return None, None, None, None, None, None
 
@@ -340,7 +341,6 @@ def parse_gamry_dta_multi_curve(raw: str) -> Tuple[Dict[str, str], List[Tuple[st
     lines = raw.splitlines()
     meta: Dict[str, str] = {}
     first_curve_idx = None
-    
     for i, line in enumerate(lines):
         if re.match(r"^\s*CURVE\d*\s+TABLE\b", line, flags=re.IGNORECASE) or line.strip().upper().startswith("CURVE"):
             first_curve_idx = i; break
@@ -354,7 +354,6 @@ def parse_gamry_dta_multi_curve(raw: str) -> Tuple[Dict[str, str], List[Tuple[st
             if m: meta[m.group(1).strip()] = m.group(2).strip()
 
     if first_curve_idx is None: return meta, []
-
     curves: List[Tuple[str, pd.DataFrame]] = []
     i = first_curve_idx
     while i < len(lines):
@@ -367,8 +366,7 @@ def parse_gamry_dta_multi_curve(raw: str) -> Tuple[Dict[str, str], List[Tuple[st
         j, col_line_idx = i + 1, None
         while j < len(lines) and j < i + 60:
             s = lines[j].strip()
-            if ("Pt" in s and "Im" in s and ("Vf" in s or "Vu" in s)):
-                col_line_idx = j; break
+            if ("Pt" in s and "Im" in s and ("Vf" in s or "Vu" in s)): col_line_idx = j; break
             j += 1
 
         if col_line_idx is None: raise ValueError(f"No pude ubicar encabezado de columnas para {curve_id}.")
@@ -377,7 +375,6 @@ def parse_gamry_dta_multi_curve(raw: str) -> Tuple[Dict[str, str], List[Tuple[st
 
         data_start = col_line_idx + 1
         if data_start < len(lines) and lines[data_start].lstrip().startswith("#"): data_start += 1
-
         rows: List[List[str]] = []
         k = data_start
         while k < len(lines):
@@ -392,8 +389,7 @@ def parse_gamry_dta_multi_curve(raw: str) -> Tuple[Dict[str, str], List[Tuple[st
             k += 1
 
         df = pd.DataFrame(rows, columns=cols)
-        for c in df.columns:
-            df[c] = pd.to_numeric(df[c].astype(str).str.replace(",", ".", regex=False).str.strip(), errors="coerce")
+        for c in df.columns: df[c] = pd.to_numeric(df[c].astype(str).str.replace(",", ".", regex=False).str.strip(), errors="coerce")
         df = df.replace([np.inf, -np.inf], np.nan).dropna(how="all").reset_index(drop=True)
         curves.append((curve_id, df))
         i = k
@@ -453,8 +449,7 @@ def parse_biologic_mpt(raw: str):
         seen.add(new_c)
 
     df = pd.DataFrame(rows, columns=unique_cols)
-    for c in df.columns:
-        df[c] = pd.to_numeric(df[c].astype(str).str.replace(",", ".", regex=False), errors="coerce")
+    for c in df.columns: df[c] = pd.to_numeric(df[c].astype(str).str.replace(",", ".", regex=False), errors="coerce")
     df = df.replace([np.inf, -np.inf], np.nan).dropna(how="all").reset_index(drop=True)
 
     col_map = {}
@@ -767,7 +762,7 @@ if uploaded_files:
                 
                 avg_mode = st.radio("Super Group Mode:", ["Plot Individual Files", "Average ALL Files inside each Group"], key=f"sg_avg_{sg}", horizontal=True)
                 
-                if is_sg_eis: fit_eis_model_toggle = st.toggle("🔋 Perform EIS Equivalent Circuit Fitting: Rs-(CPE||(Rct+(RL||L)))", value=False, key=f"fit_eis_{sg}")
+                if is_sg_eis: fit_eis_model_toggle = st.toggle("🔋 Perform EIS Equivalent Circuit Fitting: Rs-(CPE||(Rct||(RL+L)))", value=False, key=f"fit_eis_{sg}")
                 else: fit_eis_model_toggle = False
 
                 st.markdown("**Customize Legend Labels for this Super Group:**")
@@ -813,6 +808,7 @@ if uploaded_files:
                         
                         if is_sg_eis:
                             zr, zi, f_hz = tr["x"], tr["y"], tr["f"]
+                            # Scatter plots for experimental data (solid markers)
                             fig_super.add_trace(go.Scatter(x=zr, y=zi, mode='markers', name=tr["name"], marker=dict(color=c_color, size=6)))
                             
                             z_mod = np.sqrt(zr**2 + zi**2)
@@ -822,14 +818,15 @@ if uploaded_files:
                             fig_bode_phase.add_trace(go.Scatter(x=f_hz, y=phase, mode='markers', name=tr["name"], marker=dict(color=c_color, size=6)))
                             
                             if fit_eis_model_toggle:
-                                popt, err, r2, chi2, zr_fit, zi_fit = fit_uor_eis(f_hz, zr, zi)
+                                popt, r2, chi2, f_sim, zr_sim, zi_sim = fit_uor_eis(f_hz, zr, zi)
                                 if popt is not None:
                                     sg_eis_params.append({"Curve": tr["name"], "Rs (Ω)": popt[0], "CPE-T (F s^(n-1))": popt[1], "CPE-P (n)": popt[2], "Rct (Ω)": popt[3], "RL (Ω)": popt[4], "L (H)": popt[5], "R²": r2, "χ²": chi2})
-                                    fig_super.add_trace(go.Scatter(x=zr_fit, y=zi_fit, mode='lines', line=dict(color=c_color, width=2, dash='dash'), showlegend=False))
-                                    z_mod_fit = np.sqrt(zr_fit**2 + zi_fit**2)
-                                    phase_fit = np.degrees(np.arctan2(zi_fit, zr_fit))
-                                    fig_bode_mod.add_trace(go.Scatter(x=f_hz, y=z_mod_fit, mode='lines', line=dict(color=c_color, width=2, dash='dash'), showlegend=False))
-                                    fig_bode_phase.add_trace(go.Scatter(x=f_hz, y=phase_fit, mode='lines', line=dict(color=c_color, width=2, dash='dash'), showlegend=False))
+                                    # Continuous smooth dashed line for fitting
+                                    fig_super.add_trace(go.Scatter(x=zr_sim, y=zi_sim, mode='lines', line=dict(color=c_color, width=2, dash='dash'), showlegend=False))
+                                    z_mod_sim = np.sqrt(zr_sim**2 + zi_sim**2)
+                                    phase_sim = np.degrees(np.arctan2(zi_sim, zr_sim))
+                                    fig_bode_mod.add_trace(go.Scatter(x=f_sim, y=z_mod_sim, mode='lines', line=dict(color=c_color, width=2, dash='dash'), showlegend=False))
+                                    fig_bode_phase.add_trace(go.Scatter(x=f_sim, y=phase_sim, mode='lines', line=dict(color=c_color, width=2, dash='dash'), showlegend=False))
                         else:
                             if not is_sg_lsv and tr.get("sr") and tr["sr"] > 0:
                                 x_anodic = tr["x"][:np.argmax(tr["x"])+1] if np.argmax(tr["x"]) > 0 else tr["x"]
@@ -900,7 +897,7 @@ if uploaded_files:
                         st.plotly_chart(fig_bode_phase, use_container_width=True, config=dl_config)
                         
                     if fit_eis_model_toggle and sg_eis_params:
-                        st.markdown("#### ⚡ Equivalent Circuit Fit Results `[Rs-(CPE||(Rct+(RL||L)))]`")
+                        st.markdown("#### ⚡ Equivalent Circuit Fit Results `[Rs-(CPE||(Rct||(RL+L)))]`")
                         st.dataframe(pd.DataFrame(sg_eis_params).style.format({"Rs (Ω)": "{:.2f}", "CPE-T (F s^(n-1))": "{:.2e}", "CPE-P (n)": "{:.3f}", "Rct (Ω)": "{:.2f}", "RL (Ω)": "{:.2f}", "L (H)": "{:.2e}", "R²": "{:.4f}", "χ²": "{:.2e}"}), use_container_width=True)
                 else:
                     fig_super.update_layout(title="", xaxis_title=x_axis_label, yaxis_title=i_axis_label, height=500)
