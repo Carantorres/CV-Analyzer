@@ -884,16 +884,27 @@ if uploaded_files:
                 avg_mode = st.radio("Super Group Mode:", ["Plot Individual Files", "Average ALL Files inside each Group"], key=f"sg_avg_{sg}", horizontal=True)
                 
                 if is_sg_eis: 
-                    fit_eis_model_toggle = st.toggle("🔋 Perform EIS Circuit Fitting", value=False, key=f"fit_eis_{sg}")
-                    sg_eis_models = {}
-                    if fit_eis_model_toggle:
-                        st.markdown("**Select Equivalent Circuit Model for each Group:**")
-                        cols_models = st.columns(min(3, len(selected_groups)))
-                        for i, g_name in enumerate(selected_groups):
-                            clean_name = g_name.replace("📊 ", "")
-                            sg_eis_models[g_name] = cols_models[i%3].selectbox(f"Model for {clean_name}:", EIS_MODELS_LIST, key=f"eis_model_sel_{sg}_{i}")
+                    col_fit, col_model = st.columns([1, 2])
+                    with col_fit:
+                        fit_eis_model_toggle = st.toggle("🔋 Perform EIS Fit", value=False, key=f"fit_eis_{sg}")
+                    with col_model:
+                        eis_model_selection = st.selectbox(
+                            "Select Equivalent Circuit:", 
+                            [
+                                "Randles: Rs-(CPE||Rct)", 
+                                "Two Time Constants: Rs-(CPE1||R1)-(CPE2||R2)",
+                                "Parallel Adsorption: Rs-(CPE||(Rct||(RL+L)))", 
+                                "Series Adsorption: Rs-(CPE||(Rct+(RL||L)))",
+                                "Adsorption Capacitance: Rs-(CPE1||(Rct+(CPE2||Rads)))",
+                                "Bilayer + Series Adsorption: Rs-(CPE1||R1)-(CPE2||(Rct+(RL||L)))",
+                                "Three Time Constants: Rs-(CPE1||R1)-(CPE2||R2)-(CPE3||R3)"
+                            ], 
+                            key=f"eis_model_sel_{sg}",
+                            disabled=not fit_eis_model_toggle
+                        )
                 else: 
                     fit_eis_model_toggle = False
+                    eis_model_selection = None
 
                 st.markdown("**Customize Legend Labels for this Super Group:**")
                 sg_custom_labels = {}
@@ -955,12 +966,12 @@ if uploaded_files:
                                     results_dict["Curve"] = tr["name"]
                                     results_dict["Model"] = selected_model.split(" [")[0] # clean name for table
                                     sg_eis_params.append(results_dict)
-                                    # Continuous smooth dashed line for fitting
-                                    fig_super.add_trace(go.Scatter(x=zr_sim, y=zi_sim, mode='lines', line=dict(color=c_color, width=2, dash='dash'), showlegend=False, hoverinfo='skip'))
+                                    # Continuous solid line for fitting
+                                    fig_super.add_trace(go.Scatter(x=zr_sim, y=zi_sim, mode='lines', name=f"{tr['name']} Model", line=dict(color=c_color, width=2), showlegend=True, hoverinfo='skip'))
                                     z_mod_sim = np.sqrt(zr_sim**2 + zi_sim**2)
                                     phase_sim = np.degrees(np.arctan2(zi_sim, zr_sim))
-                                    fig_bode_mod.add_trace(go.Scatter(x=f_sim, y=z_mod_sim, mode='lines', line=dict(color=c_color, width=2, dash='dash'), showlegend=False, hoverinfo='skip'))
-                                    fig_bode_phase.add_trace(go.Scatter(x=f_sim, y=phase_sim, mode='lines', line=dict(color=c_color, width=2, dash='dash'), showlegend=False, hoverinfo='skip'))
+                                    fig_bode_mod.add_trace(go.Scatter(x=f_sim, y=z_mod_sim, mode='lines', name=f"{tr['name']} Model", line=dict(color=c_color, width=2), showlegend=True, hoverinfo='skip'))
+                                    fig_bode_phase.add_trace(go.Scatter(x=f_sim, y=phase_sim, mode='lines', name=f"{tr['name']} Model", line=dict(color=c_color, width=2), showlegend=True, hoverinfo='skip'))
                         else:
                             if not is_sg_lsv and tr.get("sr") and tr["sr"] > 0:
                                 x_anodic = tr["x"][:np.argmax(tr["x"])+1] if np.argmax(tr["x"]) > 0 else tr["x"]
