@@ -934,7 +934,7 @@ if uploaded_files:
                             
                             if fit_eis_model_toggle:
                                 selected_model = sg_eis_models[tr["group"]]
-                                results_dict, r2, chi2, f_sim, zr_sim, zi_sim = fit_uor_eis(f_hz, zr, zi, selected_model)
+                                results_dict, f_sim, zr_sim, zi_sim = fit_uor_eis(f_hz, zr, zi, selected_model)
                                 if results_dict is not None:
                                     results_dict["Curve"] = tr["name"]
                                     results_dict["Model"] = selected_model.split(" [")[0] # clean name for table
