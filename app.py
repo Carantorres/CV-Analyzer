@@ -43,7 +43,7 @@ with st.popover("📖 View Calculation Methods & Algorithms"):
     
     **5. Electrochemical Impedance Spectroscopy (EIS)**
     *   **Nyquist & Bode Plots:** Renders $-Z''$ vs $Z'$ (1:1 ratio), Bode $|Z|$, and Bode Phase natively.
-    *   **Equivalent Circuit Fitting:** Applies Non-Linear Least Squares (CNLS) with **Modulus Weighting** ($\\sigma = |Z|$) to ensure accurate fitting across all impedance magnitudes. Generates a high-density synthetic curve for continuous publication-ready lines. Supports 8 different literature-backed UOR models (Harrington-Conway, Warburg diffusion, pseudo-inductive loops).
+    *   **Equivalent Circuit Fitting:** Applies Non-Linear Least Squares (CNLS) with **Modulus Weighting** ($\\sigma = |Z|$) to ensure accurate fitting across all impedance magnitudes. Generates a high-density synthetic curve for continuous publication-ready lines. Supports advanced models including 3 Time Constants for complex bilayer oxide structures (e.g., pure Ni forming inner Ni(OH)2 and outer NiOOH layers).
     """)
 
 st.markdown("---")
@@ -120,7 +120,7 @@ def get_averaged_eis_curve(processed_curves: List[Tuple[str, pd.DataFrame]]) -> 
         
     return common_f[::-1], np.mean(Zr_interp, axis=0)[::-1], np.mean(Zi_interp, axis=0)[::-1], np.std(Zr_interp, axis=0)[::-1], np.std(Zi_interp, axis=0)[::-1]
 
-# --- EIS FITTING MODEL (Weighted CNLS + Literature Models) ---
+# --- EIS FITTING MODEL (Weighted CNLS + 3 Time Constants) ---
 EIS_MODELS_LIST = [
     "Randles: Rs-(CPE||Rct) [Ma et al. 2022]",
     "Randles + Warburg: Rs-(CPE||(Rct+W)) [Metrohm/Generic]",
@@ -129,7 +129,9 @@ EIS_MODELS_LIST = [
     "Series Adsorption: Rs-(CPE||(Rct+(RL||L))) [Harrington-Conway]",
     "Adsorption Capacitance: Rs-(CPE1||(Rct+(CPE2||Rads))) [ACS Appl. Mater. 2026]",
     "Inductive + Adsorption: Rs+L+(CPE1||(Rct+(CPE2||Rads))) [Springer 2017]",
-    "Two Constants + Inductive: Rs-(CPE1||R1)-(CPE2||(R2||(RL+L))) [Ni-P UOR Review]"
+    "Two Constants + Inductive: Rs-(CPE1||R1)-(CPE2||(R2||(RL+L))) [Ni-P UOR Review]",
+    "Three Time Constants: Rs-(CPE1||R1)-(CPE2||R2)-(CPE3||R3) [Bilayer NiOOH]",
+    "Three Constants + Inductive: Rs-(CPE1||R1)-(CPE2||R2)-(CPE3||(R3||(RL+L))) [Bare Ni UOR]"
 ]
 
 def fit_uor_eis(f, zr, zi, model_type):
@@ -241,6 +243,38 @@ def fit_uor_eis(f, zr, zi, model_type):
         p0 = [1e-5, 0.8, Rct_guess*0.1, 1e-4, 0.8, Rct_guess*0.9, Rct_guess*0.5, 1000]
         bounds = ([1e-9, 0.5, 0, 1e-9, 0.5, 0, 0, 1e-5], [1.0, 1.0, 1e7, 1.0, 1.0, 1e7, 1e7, 1e8])
         param_names = ["CPE1-T", "CPE1-P", "R1 (Ω)", "CPE2-T", "CPE2-P", "R2 (Ω)", "RL (Ω)", "L (H)"]
+
+    elif "Three Time Constants: Rs-(CPE1||R1)-(CPE2||R2)-(CPE3||R3)" in model_type:
+        def obj(f_val, CPE1_T, CPE1_P, R1, CPE2_T, CPE2_P, R2, CPE3_T, CPE3_P, R3):
+            w = 2 * np.pi * f_val
+            Z_CPE1 = 1.0 / (CPE1_T * (1j * w)**CPE1_P)
+            Z_1 = 1.0 / (1.0/Z_CPE1 + 1.0/R1)
+            Z_CPE2 = 1.0 / (CPE2_T * (1j * w)**CPE2_P)
+            Z_2 = 1.0 / (1.0/Z_CPE2 + 1.0/R2)
+            Z_CPE3 = 1.0 / (CPE3_T * (1j * w)**CPE3_P)
+            Z_3 = 1.0 / (1.0/Z_CPE3 + 1.0/R3)
+            Z_total = Rs_fixed + Z_1 + Z_2 + Z_3
+            return np.hstack([Z_total.real, -Z_total.imag])
+        p0 = [1e-5, 0.8, Rct_guess*0.1, 1e-4, 0.8, Rct_guess*0.3, 1e-3, 0.8, Rct_guess*0.6]
+        bounds = ([1e-9, 0.5, 0, 1e-9, 0.5, 0, 1e-9, 0.5, 0], [1.0, 1.0, 1e7, 1.0, 1.0, 1e7, 1.0, 1.0, 1e7])
+        param_names = ["CPE1-T", "CPE1-P", "R1 (Ω)", "CPE2-T", "CPE2-P", "R2 (Ω)", "CPE3-T", "CPE3-P", "R3 (Ω)"]
+
+    elif "Three Constants + Inductive: Rs-(CPE1||R1)-(CPE2||R2)-(CPE3||(R3||(RL+L)))" in model_type:
+        def obj(f_val, CPE1_T, CPE1_P, R1, CPE2_T, CPE2_P, R2, CPE3_T, CPE3_P, R3, RL, L):
+            w = 2 * np.pi * f_val
+            Z_CPE1 = 1.0 / (CPE1_T * (1j * w)**CPE1_P)
+            Z_1 = 1.0 / (1.0/Z_CPE1 + 1.0/R1)
+            Z_CPE2 = 1.0 / (CPE2_T * (1j * w)**CPE2_P)
+            Z_2 = 1.0 / (1.0/Z_CPE2 + 1.0/R2)
+            Z_CPE3 = 1.0 / (CPE3_T * (1j * w)**CPE3_P)
+            Z_ind = RL + 1j * w * L
+            Z_faradaic = 1.0 / (1.0/R3 + 1.0/Z_ind)
+            Z_3 = 1.0 / (1.0/Z_CPE3 + 1.0/Z_faradaic)
+            Z_total = Rs_fixed + Z_1 + Z_2 + Z_3
+            return np.hstack([Z_total.real, -Z_total.imag])
+        p0 = [1e-5, 0.8, Rct_guess*0.05, 1e-4, 0.8, Rct_guess*0.2, 1e-3, 0.8, Rct_guess*0.75, Rct_guess*0.5, 1000]
+        bounds = ([1e-9, 0.5, 0, 1e-9, 0.5, 0, 1e-9, 0.5, 0, 0, 1e-5], [1.0, 1.0, 1e7, 1.0, 1.0, 1e7, 1.0, 1.0, 1e7, 1e7, 1e8])
+        param_names = ["CPE1-T", "CPE1-P", "R1 (Ω)", "CPE2-T", "CPE2-P", "R2 (Ω)", "CPE3-T", "CPE3-P", "R3 (Ω)", "RL (Ω)", "L (H)"]
         
     try:
         popt, pcov = curve_fit(obj, f, y_data, p0=p0, bounds=bounds, sigma=sigma, maxfev=100000)
@@ -1017,7 +1051,7 @@ if uploaded_files:
                     if fit_eis_model_toggle and sg_eis_params:
                         st.markdown(f"#### ⚡ Equivalent Circuit Fit Results")
                         df_eis = pd.DataFrame(sg_eis_params)
-                        all_possible_cols = ["Curve", "Model", "Rs (Ω)", "CPE-T", "CPE-P", "Rct (Ω)", "W (Ω·s^-0.5)", "RL (Ω)", "L (H)", "Ls (H)", "CPE1-T", "CPE1-P", "R1 (Ω)", "CPE2-T", "CPE2-P", "R2 (Ω)", "Rads (Ω)", "R²", "χ²"]
+                        all_possible_cols = ["Curve", "Model", "Rs (Ω)", "CPE-T", "CPE-P", "Rct (Ω)", "W (Ω·s^-0.5)", "RL (Ω)", "L (H)", "Ls (H)", "CPE1-T", "CPE1-P", "R1 (Ω)", "CPE2-T", "CPE2-P", "R2 (Ω)", "CPE3-T", "CPE3-P", "R3 (Ω)", "Rads (Ω)", "R²", "χ²"]
                         cols = [c for c in all_possible_cols if c in df_eis.columns]
                         df_eis = df_eis[cols]
                         
@@ -1025,8 +1059,9 @@ if uploaded_files:
                             "Rs (Ω)": "{:.2f}", "CPE-T": "{:.2e}", "CPE-P": "{:.3f}", 
                             "Rct (Ω)": "{:.2f}", "W (Ω·s^-0.5)": "{:.2e}", "RL (Ω)": "{:.2f}", "L (H)": "{:.2e}", "Ls (H)": "{:.2e}",
                             "CPE1-T": "{:.2e}", "CPE1-P": "{:.3f}", "R1 (Ω)": "{:.2f}", 
-                            "CPE2-T": "{:.2e}", "CPE2-P": "{:.3f}", "R2 (Ω)": "{:.2f}", "Rads (Ω)": "{:.2f}",
-                            "R²": "{:.4f}", "χ²": "{:.2e}"
+                            "CPE2-T": "{:.2e}", "CPE2-P": "{:.3f}", "R2 (Ω)": "{:.2f}", 
+                            "CPE3-T": "{:.2e}", "CPE3-P": "{:.3f}", "R3 (Ω)": "{:.2f}", 
+                            "Rads (Ω)": "{:.2f}", "R²": "{:.4f}", "χ²": "{:.2e}"
                         }
                         st.dataframe(df_eis.style.format({k:v for k,v in format_dict.items() if k in df_eis.columns}), use_container_width=True)
                 else:
