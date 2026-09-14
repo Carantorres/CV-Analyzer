@@ -43,7 +43,7 @@ with st.popover("📖 View Calculation Methods & Algorithms"):
     
     **5. Electrochemical Impedance Spectroscopy (EIS)**
     *   **Nyquist & Bode Plots:** Renders $-Z''$ vs $Z'$ (1:1 ratio), Bode $|Z|$, and Bode Phase natively.
-    *   **Equivalent Circuit Fitting:** Applies Non-Linear Least Squares (CNLS) with **Modulus Weighting** ($\\sigma = |Z|$) to ensure accurate fitting across all impedance magnitudes. Generates a high-density synthetic curve for continuous publication-ready lines. Supports 6 different complex UOR models including Multiple Time Constants and Inductive/Adsorption loops.
+    *   **Equivalent Circuit Fitting:** Applies Non-Linear Least Squares (CNLS) with **Modulus Weighting** ($\\sigma = |Z|$) to ensure accurate fitting across all impedance magnitudes. Generates a high-density synthetic curve for continuous publication-ready lines. Supports 8 different literature-backed UOR models (Harrington-Conway, Warburg diffusion, pseudo-inductive loops).
     """)
 
 st.markdown("---")
@@ -120,17 +120,28 @@ def get_averaged_eis_curve(processed_curves: List[Tuple[str, pd.DataFrame]]) -> 
         
     return common_f[::-1], np.mean(Zr_interp, axis=0)[::-1], np.mean(Zi_interp, axis=0)[::-1], np.std(Zr_interp, axis=0)[::-1], np.std(Zi_interp, axis=0)[::-1]
 
-# --- EIS FITTING MODEL (Weighted CNLS + Smooth Curve + Robust Selection) ---
+# --- EIS FITTING MODEL (Weighted CNLS + Literature Models) ---
+EIS_MODELS_LIST = [
+    "Randles: Rs-(CPE||Rct) [Ma et al. 2022]",
+    "Randles + Warburg: Rs-(CPE||(Rct+W)) [Metrohm/Generic]",
+    "Two Time Constants: Rs-(CPE1||R1)-(CPE2||R2) [Guo et al. 2016]",
+    "Parallel Adsorption: Rs-(CPE||(Rct||(RL+L))) [Classic UOR]",
+    "Series Adsorption: Rs-(CPE||(Rct+(RL||L))) [Harrington-Conway]",
+    "Adsorption Capacitance: Rs-(CPE1||(Rct+(CPE2||Rads))) [ACS Appl. Mater. 2026]",
+    "Inductive + Adsorption: Rs+L+(CPE1||(Rct+(CPE2||Rads))) [Springer 2017]",
+    "Two Constants + Inductive: Rs-(CPE1||R1)-(CPE2||(R2||(RL+L))) [Ni-P UOR Review]"
+]
+
 def fit_uor_eis(f, zr, zi, model_type):
     y_data = np.hstack([zr, zi])
     Z_data = zr - 1j * zi
     abs_Z = np.abs(Z_data)
-    sigma = np.hstack([abs_Z, abs_Z]) # Modulus weighting!
+    sigma = np.hstack([abs_Z, abs_Z]) # Modulus weighting
     
     Rs_fixed = np.min(zr)
     Rct_guess = np.abs(np.max(zr) - Rs_fixed)
     
-    if model_type == "Randles: Rs-(CPE||Rct)":
+    if "Randles: Rs-(CPE||Rct)" in model_type:
         def obj(f_val, CPE_T, CPE_P, Rct):
             w = 2 * np.pi * f_val
             Z_CPE = 1.0 / (CPE_T * (1j * w)**CPE_P)
@@ -140,7 +151,18 @@ def fit_uor_eis(f, zr, zi, model_type):
         bounds = ([1e-9, 0.5, 0], [1.0, 1.0, 1e7])
         param_names = ["CPE-T", "CPE-P", "Rct (Ω)"]
         
-    elif model_type == "Two Time Constants: Rs-(CPE1||R1)-(CPE2||R2)":
+    elif "Randles + Warburg" in model_type:
+        def obj(f_val, CPE_T, CPE_P, Rct, W_R):
+            w = 2 * np.pi * f_val
+            Z_CPE = 1.0 / (CPE_T * (1j * w)**CPE_P)
+            Z_W = W_R / (1j * w)**0.5
+            Z_total = Rs_fixed + 1.0 / (1.0/Z_CPE + 1.0/(Rct + Z_W))
+            return np.hstack([Z_total.real, -Z_total.imag])
+        p0 = [1e-4, 0.8, Rct_guess, Rct_guess]
+        bounds = ([1e-9, 0.5, 0, 0], [1.0, 1.0, 1e7, 1e8])
+        param_names = ["CPE-T", "CPE-P", "Rct (Ω)", "W (Ω·s^-0.5)"]
+        
+    elif "Two Time Constants" in model_type and "Inductive" not in model_type:
         def obj(f_val, CPE1_T, CPE1_P, R1, CPE2_T, CPE2_P, R2):
             w = 2 * np.pi * f_val
             Z_CPE1 = 1.0 / (CPE1_T * (1j * w)**CPE1_P)
@@ -153,7 +175,7 @@ def fit_uor_eis(f, zr, zi, model_type):
         bounds = ([1e-9, 0.5, 0, 1e-9, 0.5, 0], [1.0, 1.0, 1e7, 1.0, 1.0, 1e7])
         param_names = ["CPE1-T", "CPE1-P", "R1 (Ω)", "CPE2-T", "CPE2-P", "R2 (Ω)"]
         
-    elif model_type == "Parallel Adsorption: Rs-(CPE||(Rct||(RL+L)))":
+    elif "Parallel Adsorption" in model_type:
         def obj(f_val, CPE_T, CPE_P, Rct, RL, L):
             w = 2 * np.pi * f_val
             Z_CPE = 1.0 / (CPE_T * (1j * w)**CPE_P)
@@ -165,7 +187,7 @@ def fit_uor_eis(f, zr, zi, model_type):
         bounds = ([1e-9, 0.5, 0, 0, 1e-5], [1.0, 1.0, 1e7, 1e7, 1e8])
         param_names = ["CPE-T", "CPE-P", "Rct (Ω)", "RL (Ω)", "L (H)"]
         
-    elif model_type == "Series Adsorption: Rs-(CPE||(Rct+(RL||L)))":
+    elif "Series Adsorption" in model_type:
         def obj(f_val, CPE_T, CPE_P, Rct, RL, L):
             w = 2 * np.pi * f_val
             Z_CPE = 1.0 / (CPE_T * (1j * w)**CPE_P)
@@ -178,7 +200,7 @@ def fit_uor_eis(f, zr, zi, model_type):
         bounds = ([1e-9, 0.5, 0, -1e7, 1e-5], [1.0, 1.0, 1e7, 1e7, 1e8])
         param_names = ["CPE-T", "CPE-P", "Rct (Ω)", "RL (Ω)", "L (H)"]
         
-    elif model_type == "Adsorption Capacitance: Rs-(CPE1||(Rct+(CPE2||Rads)))":
+    elif "Adsorption Capacitance" in model_type:
         def obj(f_val, CPE1_T, CPE1_P, Rct, CPE2_T, CPE2_P, Rads):
             w = 2 * np.pi * f_val
             Z_CPE1 = 1.0 / (CPE1_T * (1j * w)**CPE1_P)
@@ -191,17 +213,29 @@ def fit_uor_eis(f, zr, zi, model_type):
         bounds = ([1e-9, 0.5, 0, 1e-9, 0.5, 0], [1.0, 1.0, 1e7, 1.0, 1.0, 1e7])
         param_names = ["CPE1-T", "CPE1-P", "Rct (Ω)", "CPE2-T", "CPE2-P", "Rads (Ω)"]
         
-    elif model_type == "Two Time Constants + Inductive: Rs-(CPE1||R1)-(CPE2||(R2||(RL+L)))":
+    elif "Inductive + Adsorption" in model_type:
+        def obj(f_val, L_s, CPE1_T, CPE1_P, Rct, CPE2_T, CPE2_P, Rads):
+            w = 2 * np.pi * f_val
+            Z_Ls = 1j * w * L_s
+            Z_CPE1 = 1.0 / (CPE1_T * (1j * w)**CPE1_P)
+            Z_CPE2 = 1.0 / (CPE2_T * (1j * w)**CPE2_P)
+            Z_ads = 1.0 / (1.0/Z_CPE2 + 1.0/Rads)
+            Z_faradaic = Rct + Z_ads
+            Z_total = Rs_fixed + Z_Ls + 1.0 / (1.0/Z_CPE1 + 1.0/Z_faradaic)
+            return np.hstack([Z_total.real, -Z_total.imag])
+        p0 = [1e-6, 1e-5, 0.8, Rct_guess*0.5, 1e-3, 0.9, Rct_guess*0.5]
+        bounds = ([0, 1e-9, 0.5, 0, 1e-9, 0.5, 0], [1e-2, 1.0, 1.0, 1e7, 1.0, 1.0, 1e7])
+        param_names = ["Ls (H)", "CPE1-T", "CPE1-P", "Rct (Ω)", "CPE2-T", "CPE2-P", "Rads (Ω)"]
+        
+    elif "Two Constants + Inductive" in model_type:
         def obj(f_val, CPE1_T, CPE1_P, R1, CPE2_T, CPE2_P, R2, RL, L):
             w = 2 * np.pi * f_val
             Z_CPE1 = 1.0 / (CPE1_T * (1j * w)**CPE1_P)
             Z_1 = 1.0 / (1.0/Z_CPE1 + 1.0/R1)
-            
             Z_CPE2 = 1.0 / (CPE2_T * (1j * w)**CPE2_P)
             Z_ind = RL + 1j * w * L
             Z_faradaic = 1.0 / (1.0/R2 + 1.0/Z_ind)
             Z_2 = 1.0 / (1.0/Z_CPE2 + 1.0/Z_faradaic)
-            
             Z_total = Rs_fixed + Z_1 + Z_2
             return np.hstack([Z_total.real, -Z_total.imag])
         p0 = [1e-5, 0.8, Rct_guess*0.1, 1e-4, 0.8, Rct_guess*0.9, Rct_guess*0.5, 1000]
@@ -834,26 +868,16 @@ if uploaded_files:
                 avg_mode = st.radio("Super Group Mode:", ["Plot Individual Files", "Average ALL Files inside each Group"], key=f"sg_avg_{sg}", horizontal=True)
                 
                 if is_sg_eis: 
-                    col_fit, col_model = st.columns([1, 2])
-                    with col_fit:
-                        fit_eis_model_toggle = st.toggle("🔋 Perform EIS Fit", value=False, key=f"fit_eis_{sg}")
-                    with col_model:
-                        eis_model_selection = st.selectbox(
-                            "Select Equivalent Circuit:", 
-                            [
-                                "Randles: Rs-(CPE||Rct)", 
-                                "Two Time Constants: Rs-(CPE1||R1)-(CPE2||R2)",
-                                "Parallel Adsorption: Rs-(CPE||(Rct||(RL+L)))", 
-                                "Series Adsorption: Rs-(CPE||(Rct+(RL||L)))",
-                                "Adsorption Capacitance: Rs-(CPE1||(Rct+(CPE2||Rads)))",
-                                "Two Time Constants + Inductive: Rs-(CPE1||R1)-(CPE2||(R2||(RL+L)))"
-                            ], 
-                            key=f"eis_model_sel_{sg}",
-                            disabled=not fit_eis_model_toggle
-                        )
+                    fit_eis_model_toggle = st.toggle("🔋 Perform EIS Circuit Fitting", value=False, key=f"fit_eis_{sg}")
+                    sg_eis_models = {}
+                    if fit_eis_model_toggle:
+                        st.markdown("**Select Equivalent Circuit Model for each Group:**")
+                        cols_models = st.columns(min(3, len(selected_groups)))
+                        for i, g_name in enumerate(selected_groups):
+                            clean_name = g_name.replace("📊 ", "")
+                            sg_eis_models[g_name] = cols_models[i%3].selectbox(f"Model for {clean_name}:", EIS_MODELS_LIST, key=f"eis_model_sel_{sg}_{i}")
                 else: 
                     fit_eis_model_toggle = False
-                    eis_model_selection = None
 
                 st.markdown("**Customize Legend Labels for this Super Group:**")
                 sg_custom_labels = {}
@@ -879,18 +903,19 @@ if uploaded_files:
                         if is_sg_eis:
                             common_f, zr_mean, zi_mean, zr_std, zi_std = get_averaged_eis_curve([(tr["name"], tr["df"]) for tr in g_data["traces"]])
                             df_mean = pd.DataFrame({"x": zr_mean, "y": zi_mean, "f": common_f})
-                            traces_to_plot = [{"x": zr_mean, "y": zi_mean, "f": common_f, "std": None, "name": sg_custom_labels[g_name], "df": df_mean, "tech": "EIS"}]
+                            traces_to_plot = [{"x": zr_mean, "y": zi_mean, "f": common_f, "std": None, "name": sg_custom_labels[g_name], "df": df_mean, "tech": "EIS", "group": g_name}]
                         else:
                             E_mean, I_mean, I_std = get_averaged_curve([(tr["name"], tr["df"]) for tr in g_data["traces"]])
                             df_mean = pd.DataFrame({"x": E_mean, "y": I_mean})
                             fallback_sr = np.mean([t["sr"] for t in g_data["traces"] if t["sr"]>0]) if any(t["sr"]>0 for t in g_data["traces"]) else 0.0
                             sr_val = get_sr_from_name(sg_custom_labels[g_name], fallback_sr)
-                            traces_to_plot = [{"x": E_mean, "y": I_mean, "f": None, "std": I_std, "name": sg_custom_labels[g_name], "df": df_mean, "tech": "LSV" if is_sg_lsv else "CV", "sr": sr_val}]
+                            traces_to_plot = [{"x": E_mean, "y": I_mean, "f": None, "std": I_std, "name": sg_custom_labels[g_name], "df": df_mean, "tech": "LSV" if is_sg_lsv else "CV", "sr": sr_val, "group": g_name}]
                     else:
                         for tr in g_data["traces"]:
                             final_name = sg_custom_labels[g_name] if len(g_data["traces"]) == 1 else f"{sg_custom_labels[g_name]} - {tr['name']}"
                             tr_copy = tr.copy()
                             tr_copy["name"] = final_name
+                            tr_copy["group"] = g_name
                             traces_to_plot.append(tr_copy)
 
                     for tr in traces_to_plot:
@@ -898,7 +923,7 @@ if uploaded_files:
                         
                         if is_sg_eis:
                             zr, zi, f_hz = tr["x"], tr["y"], tr["f"]
-                            # Experimental data as solid markers
+                            # Scatter plots for experimental data
                             fig_super.add_trace(go.Scatter(x=zr, y=zi, mode='markers', name=tr["name"], marker=dict(color=c_color, size=6)))
                             
                             z_mod = np.sqrt(zr**2 + zi**2)
@@ -908,11 +933,13 @@ if uploaded_files:
                             fig_bode_phase.add_trace(go.Scatter(x=f_hz, y=phase, mode='markers', name=tr["name"], marker=dict(color=c_color, size=6)))
                             
                             if fit_eis_model_toggle:
-                                results_dict, f_sim, zr_sim, zi_sim = fit_uor_eis(f_hz, zr, zi, eis_model_selection)
+                                selected_model = sg_eis_models[tr["group"]]
+                                results_dict, r2, chi2, f_sim, zr_sim, zi_sim = fit_uor_eis(f_hz, zr, zi, selected_model)
                                 if results_dict is not None:
                                     results_dict["Curve"] = tr["name"]
+                                    results_dict["Model"] = selected_model.split(" [")[0] # clean name for table
                                     sg_eis_params.append(results_dict)
-                                    # Plotting smooth simulated fit curve
+                                    # Continuous smooth dashed line for fitting
                                     fig_super.add_trace(go.Scatter(x=zr_sim, y=zi_sim, mode='lines', line=dict(color=c_color, width=2, dash='dash'), showlegend=False, hoverinfo='skip'))
                                     z_mod_sim = np.sqrt(zr_sim**2 + zi_sim**2)
                                     phase_sim = np.degrees(np.arctan2(zi_sim, zr_sim))
@@ -988,11 +1015,19 @@ if uploaded_files:
                         st.plotly_chart(fig_bode_phase, use_container_width=True, config=dl_config)
                         
                     if fit_eis_model_toggle and sg_eis_params:
-                        st.markdown(f"#### ⚡ Equivalent Circuit Fit Results `[{eis_model_selection}]`")
+                        st.markdown(f"#### ⚡ Equivalent Circuit Fit Results")
                         df_eis = pd.DataFrame(sg_eis_params)
-                        cols = ["Curve", "Rs (Ω)", "CPE-T", "CPE-P", "Rct (Ω)", "RL (Ω)", "L (H)", "CPE1-T", "CPE1-P", "R1 (Ω)", "CPE2-T", "CPE2-P", "R2 (Ω)", "Rads (Ω)", "R²", "χ²"]
-                        df_eis = df_eis[[c for c in cols if c in df_eis.columns]]
-                        format_dict = {"Rs (Ω)": "{:.2f}", "CPE-T": "{:.2e}", "CPE-P": "{:.3f}", "Rct (Ω)": "{:.2f}", "RL (Ω)": "{:.2f}", "L (H)": "{:.2e}", "CPE1-T": "{:.2e}", "CPE1-P": "{:.3f}", "R1 (Ω)": "{:.2f}", "CPE2-T": "{:.2e}", "CPE2-P": "{:.3f}", "R2 (Ω)": "{:.2f}", "Rads (Ω)": "{:.2f}", "R²": "{:.4f}", "χ²": "{:.2e}"}
+                        all_possible_cols = ["Curve", "Model", "Rs (Ω)", "CPE-T", "CPE-P", "Rct (Ω)", "W (Ω·s^-0.5)", "RL (Ω)", "L (H)", "Ls (H)", "CPE1-T", "CPE1-P", "R1 (Ω)", "CPE2-T", "CPE2-P", "R2 (Ω)", "Rads (Ω)", "R²", "χ²"]
+                        cols = [c for c in all_possible_cols if c in df_eis.columns]
+                        df_eis = df_eis[cols]
+                        
+                        format_dict = {
+                            "Rs (Ω)": "{:.2f}", "CPE-T": "{:.2e}", "CPE-P": "{:.3f}", 
+                            "Rct (Ω)": "{:.2f}", "W (Ω·s^-0.5)": "{:.2e}", "RL (Ω)": "{:.2f}", "L (H)": "{:.2e}", "Ls (H)": "{:.2e}",
+                            "CPE1-T": "{:.2e}", "CPE1-P": "{:.3f}", "R1 (Ω)": "{:.2f}", 
+                            "CPE2-T": "{:.2e}", "CPE2-P": "{:.3f}", "R2 (Ω)": "{:.2f}", "Rads (Ω)": "{:.2f}",
+                            "R²": "{:.4f}", "χ²": "{:.2e}"
+                        }
                         st.dataframe(df_eis.style.format({k:v for k,v in format_dict.items() if k in df_eis.columns}), use_container_width=True)
                 else:
                     fig_super.update_layout(title="", xaxis_title=x_axis_label, yaxis_title=i_axis_label, height=500)
