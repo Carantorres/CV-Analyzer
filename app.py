@@ -42,41 +42,99 @@ with st.popover("📖 View Calculation Methods & Algorithms"):
     *   **Equivalent Circuit Fitting:** Applies Non-Linear Least Squares (CNLS) with **Modulus Weighting** ($\\sigma = |Z|$) to ensure accurate fitting across all impedance magnitudes. Generates a high-density synthetic curve for continuous publication-ready lines. 
     *   **Frequency Cropping:** Allows discarding non-stationary low/high frequency data (e.g., gas bubble noise) that violates Kramers-Kronig validity before fitting.
     
-    **5. Chemical Speciation (Medusa)**
+    **5. Chemical Speciation (Hydra/Medusa)**
     *   Features a custom reverse-engineering algorithm that reads raw `.plt` vector files and maps screen coordinates back to chemical thermodynamic data (Log Conc / Fraction vs pH) to generate high-quality plots.
     """)
 
 st.markdown("---")
 
 # ============================================================
+# SIDEBAR SETUP (ALL CONTROLS)
+# ============================================================
+with st.sidebar:
+    st.header("🎛️ Instrument Format")
+    instrument = st.selectbox(
+        "Select default parser / equipment:",
+        [
+            "Gamry 1010B (.DTA)", 
+            "Biologic SP-50e (.mpt)", 
+            "PalmSens PSTrace (.csv)", 
+            "Hydra & Medusa Speciation (.plt / .txt)"
+        ]
+    )
+    st.info("💡 Tip: PalmSens, CP and Medusa (.plt) files are auto-detected!")
+
+    st.markdown("---")
+    st.header("⚡ iR Drop Compensation")
+    apply_ir = st.toggle("Apply iR Compensation", value=False)
+    ru_ohms = st.number_input("Uncompensated Resistance (Ru) [Ohms]", value=10.0, step=1.0) if apply_ir else 0.0
+    comp_percent = st.slider("Compensation Percentage (%)", 0, 100, 85, 1) if apply_ir else 0.0
+
+    st.markdown("---")
+    st.header("⚖️ Reference Electrode & RHE")
+    ref_elec = st.selectbox("Reference Electrode", ["Ag/AgCl (sat. KCl)", "SCE (sat. KCl)", "Hg/HgO (1M KOH)", "Custom"])
+    custom_ref_name = st.text_input("Custom Reference Label", value="Ref.") if ref_elec == "Custom" else ref_elec.split(" (")[0]
+        
+    convert_to_rhe = st.toggle("Convert E to RHE scale", value=True)
+    if convert_to_rhe:
+        e0_ref = st.number_input("Custom E0_Ref (V)", value=0.000, step=0.01) if ref_elec == "Custom" else (0.197 if ref_elec.startswith("Ag") else (0.241 if ref_elec.startswith("SCE") else 0.098))
+        if ref_elec != "Custom": st.info(f"Using Standard E₀ = {e0_ref} V")
+        ph_val = st.number_input("pH of the solution", value=14.0, step=0.1)
+        x_axis_label = "E (V vs RHE)" + (" [iR corrected]" if apply_ir else "")
+    else:
+        e0_ref, ph_val = 0.0, 0.0
+        x_axis_label = f"E (V vs {custom_ref_name})" + (" [iR corrected]" if apply_ir else "")
+
+    st.markdown("---")
+    st.header("⚙️ Catalytic Parameters")
+    electrode_area = st.number_input("Electrode Area (cm²)", min_value=0.00001, value=1.00000, step=0.001, format="%.5f")
+    manual_scan_rate = st.number_input("Manual Scan Rate (mV/s) [Optional]", value=0.0, step=10.0)
+    e_rev = st.number_input("Thermodynamic Potential (E_rev)", value=0.000, step=0.01)
+
+    st.markdown("---")
+    st.header("🔋 Peak Search (Kinetics)")
+    limit_peak_search = st.toggle("Limit Peak Search Window", value=False)
+    if limit_peak_search:
+        c_min, c_max = st.columns(2)
+        with c_min: peak_min_v = st.number_input("Min E (V)", value=0.20, step=0.05)
+        with c_max: peak_max_v = st.number_input("Max E (V)", value=0.60, step=0.05)
+    else:
+        peak_min_v, peak_max_v = None, None
+        
+    st.markdown("---")
+    st.header("✂️ EIS Frequency Cropping")
+    crop_eis = st.toggle("Limit Frequency Range", value=False, help="Discard noisy data at very low or high frequencies before fitting (e.g. gas bubble noise at low Hz).")
+    if crop_eis:
+        c_fmin, c_fmax = st.columns(2)
+        with c_fmin: eis_min_f = st.number_input("Min Freq (Hz)", value=0.05, format="%.3f")
+        with c_fmax: eis_max_f = st.number_input("Max Freq (Hz)", value=100000.0, step=1000.0)
+    else:
+        eis_min_f, eis_max_f = 1e-9, 1e9
+
+    st.markdown("---")
+    st.header("🎨 Plot Formatting")
+    scientific_style = st.toggle("Scientific Paper Style (ACS/Elsevier)", value=True)
+    show_sd_shadow = st.toggle("Show SD Shadow on Averages", value=True)
+    leg_pos = st.selectbox("Quick Positions", ["Top-Right", "Top-Left", "Bottom-Right", "Bottom-Left", "Outside Right", "Custom..."])
+    if leg_pos == "Top-Right": lx, ly, lxa, lya = 0.99, 0.99, "right", "top"
+    elif leg_pos == "Top-Left": lx, ly, lxa, lya = 0.01, 0.99, "left", "top"
+    elif leg_pos == "Bottom-Right": lx, ly, lxa, lya = 0.99, 0.01, "right", "bottom"
+    elif leg_pos == "Bottom-Left": lx, ly, lxa, lya = 0.01, 0.01, "left", "bottom"
+    elif leg_pos == "Outside Right": lx, ly, lxa, lya = 1.02, 1.0, "left", "top"
+    else:
+        lx = st.slider("X Coordinate", min_value=-0.2, max_value=1.5, value=0.99, step=0.01)
+        ly = st.slider("Y Coordinate", min_value=-0.2, max_value=1.5, value=0.99, step=0.01)
+        lxa, lya = "auto", "auto"
+    
+    st.markdown("---")
+    st.header("📄 Export Full Report")
+    components.html("""<button onclick="window.parent.print();" style="background-color:#FF4B4B; color:white; border:none; border-radius:4px; padding:0.5rem 1rem; font-size:1rem; font-weight:600; cursor:pointer; width:100%;">🖨️ Save Page as PDF</button>""", height=50)
+    st.markdown("<div style='text-align: center; margin-top: 50px;'><p style='color: #888888; font-size: 0.85rem; font-family: sans-serif;'>Developed by<br><b>PhD(c) Carlos A. Torres-Ramírez</b><br><br></p></div>", unsafe_allow_html=True)
+
+
+# ============================================================
 # UTILITIES & MATH
 # ============================================================
-def to_rgba(color_str: str, alpha: float = 0.2) -> str:
-    color_str = color_str.strip().lower()
-    if color_str.startswith('#'):
-        h = color_str.lstrip('#')
-        if len(h) == 6:
-            return f"rgba({int(h[0:2], 16)}, {int(h[2:4], 16)}, {int(h[4:6], 16)}, {alpha})"
-    elif color_str.startswith('rgb('):
-        return color_str.replace('rgb(', 'rgba(').replace(')', f', {alpha})')
-    return f"rgba(150, 150, 150, {alpha})"
-
-def _to_float(x):
-    if x is None: return None
-    try: return float(str(x).replace(",", "."))
-    except: return None
-
-def mad_sigma(x: np.ndarray) -> float:
-    x = x[np.isfinite(x)]
-    if len(x) < 10: return float(np.std(x)) if len(x) else np.nan
-    med = np.median(x)
-    mad = np.median(np.abs(x - med))
-    return 1.4826 * mad if mad > 0 else float(np.std(x))
-
-def get_sr_from_name(name: str, default_sr: float) -> float:
-    m = re.search(r'(\d+\.?\d*)\s*mV/s', name, re.IGNORECASE)
-    if m: return float(m.group(1))
-    return default_sr if default_sr is not None else 0.0
 
 def get_averaged_curve(processed_curves: List[Tuple[str, pd.DataFrame]]) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     if not processed_curves: return None, None, None
@@ -128,7 +186,7 @@ def fit_uor_eis(f, zr, zi, model_type):
     y_data = np.hstack([zr, zi])
     Z_data = zr - 1j * zi
     abs_Z = np.abs(Z_data)
-    sigma = np.hstack([abs_Z, abs_Z]) # Modulus weighting
+    sigma = np.hstack([abs_Z, abs_Z]) 
     
     Rs_fixed = np.min(zr)
     R_tot = np.abs(np.max(zr) - Rs_fixed)
@@ -817,17 +875,21 @@ def convert_df_to_excel(curves_list: List[Tuple[str, pd.DataFrame]]) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         seen_names = set()
+        sheets_written = 0
         for cid, df in curves_list:
             if "Z_real" in df.columns and "neg_Z_imag" in df.columns:
                 clean_df = df.replace([np.inf, -np.inf], np.nan).dropna(subset=["Z_real", "neg_Z_imag"])
             elif "Time" in df.columns and "Vf" in df.columns:
                 clean_df = df.replace([np.inf, -np.inf], np.nan).dropna(subset=["Time", "Vf"])
+            elif "x" in df.columns and "y" in df.columns:
+                # Custom handler for Medusa curves
+                clean_df = df.replace([np.inf, -np.inf], np.nan).dropna(subset=["x", "y"])
             else:
                 Ecol = "Vf" if "Vf" in df.columns else ("Vu" if "Vu" in df.columns else None)
                 if Ecol is None or "Im" not in df.columns: continue
                 clean_df = df.replace([np.inf, -np.inf], np.nan).dropna(subset=[Ecol, "Im"])
             
-            if len(clean_df) >= 5:
+            if len(clean_df) >= 2:
                 safe_name = re.sub(r'[\\*?:/\[\]]', '_', cid)[:31].strip() or "Sheet"
                 original_safe_name, counter = safe_name, 1
                 while safe_name in seen_names:
@@ -836,78 +898,13 @@ def convert_df_to_excel(curves_list: List[Tuple[str, pd.DataFrame]]) -> bytes:
                     counter += 1
                 seen_names.add(safe_name)
                 clean_df.to_excel(writer, index=False, sheet_name=safe_name)
+                sheets_written += 1
+                
+        # Safety fallback to prevent IndexError if no valid numeric data was found
+        if sheets_written == 0:
+            pd.DataFrame({"Message": ["No parseable data found for Excel export"]}).to_excel(writer, index=False, sheet_name="Empty")
+            
     return output.getvalue()
-
-# ============================================================
-# APP SIDEBAR CONTROLS
-# ============================================================
-with st.sidebar:
-    st.markdown("---")
-    st.header("⚡ iR Drop Compensation")
-    apply_ir = st.toggle("Apply iR Compensation", value=False)
-    ru_ohms = st.number_input("Uncompensated Resistance (Ru) [Ohms]", value=10.0, step=1.0) if apply_ir else 0.0
-    comp_percent = st.slider("Compensation Percentage (%)", 0, 100, 85, 1) if apply_ir else 0.0
-
-    st.markdown("---")
-    st.header("⚖️ Reference Electrode & RHE")
-    ref_elec = st.selectbox("Reference Electrode", ["Ag/AgCl (sat. KCl)", "SCE (sat. KCl)", "Hg/HgO (1M KOH)", "Custom"])
-    custom_ref_name = st.text_input("Custom Reference Label", value="Ref.") if ref_elec == "Custom" else ref_elec.split(" (")[0]
-        
-    convert_to_rhe = st.toggle("Convert E to RHE scale", value=True)
-    if convert_to_rhe:
-        e0_ref = st.number_input("Custom E0_Ref (V)", value=0.000, step=0.01) if ref_elec == "Custom" else (0.197 if ref_elec.startswith("Ag") else (0.241 if ref_elec.startswith("SCE") else 0.098))
-        if ref_elec != "Custom": st.info(f"Using Standard E₀ = {e0_ref} V")
-        ph_val = st.number_input("pH of the solution", value=14.0, step=0.1)
-        x_axis_label = "E (V vs RHE)" + (" [iR corrected]" if apply_ir else "")
-    else:
-        e0_ref, ph_val = 0.0, 0.0
-        x_axis_label = f"E (V vs {custom_ref_name})" + (" [iR corrected]" if apply_ir else "")
-
-    st.markdown("---")
-    st.header("⚙️ Catalytic Parameters")
-    electrode_area = st.number_input("Electrode Area (cm²)", min_value=0.00001, value=1.00000, step=0.001, format="%.5f")
-    manual_scan_rate = st.number_input("Manual Scan Rate (mV/s) [Optional]", value=0.0, step=10.0)
-    e_rev = st.number_input("Thermodynamic Potential (E_rev)", value=0.000, step=0.01)
-
-    st.markdown("---")
-    st.header("🔋 Peak Search (Kinetics)")
-    limit_peak_search = st.toggle("Limit Peak Search Window", value=False)
-    if limit_peak_search:
-        c_min, c_max = st.columns(2)
-        with c_min: peak_min_v = st.number_input("Min E (V)", value=0.20, step=0.05)
-        with c_max: peak_max_v = st.number_input("Max E (V)", value=0.60, step=0.05)
-    else:
-        peak_min_v, peak_max_v = None, None
-        
-    st.markdown("---")
-    st.header("✂️ EIS Frequency Cropping")
-    crop_eis = st.toggle("Limit Frequency Range", value=False, help="Discard noisy data at very low or high frequencies before fitting (e.g. gas bubble noise at low Hz).")
-    if crop_eis:
-        c_fmin, c_fmax = st.columns(2)
-        with c_fmin: eis_min_f = st.number_input("Min Freq (Hz)", value=0.05, format="%.3f")
-        with c_fmax: eis_max_f = st.number_input("Max Freq (Hz)", value=100000.0, step=1000.0)
-    else:
-        eis_min_f, eis_max_f = 1e-9, 1e9
-
-    st.markdown("---")
-    st.header("🎨 Plot Formatting")
-    scientific_style = st.toggle("Scientific Paper Style (ACS/Elsevier)", value=True)
-    show_sd_shadow = st.toggle("Show SD Shadow on Averages", value=True)
-    leg_pos = st.selectbox("Quick Positions", ["Top-Right", "Top-Left", "Bottom-Right", "Bottom-Left", "Outside Right", "Custom..."])
-    if leg_pos == "Top-Right": lx, ly, lxa, lya = 0.99, 0.99, "right", "top"
-    elif leg_pos == "Top-Left": lx, ly, lxa, lya = 0.01, 0.99, "left", "top"
-    elif leg_pos == "Bottom-Right": lx, ly, lxa, lya = 0.99, 0.01, "right", "bottom"
-    elif leg_pos == "Bottom-Left": lx, ly, lxa, lya = 0.01, 0.01, "left", "bottom"
-    elif leg_pos == "Outside Right": lx, ly, lxa, lya = 1.02, 1.0, "left", "top"
-    else:
-        lx = st.slider("X Coordinate", min_value=-0.2, max_value=1.5, value=0.99, step=0.01)
-        ly = st.slider("Y Coordinate", min_value=-0.2, max_value=1.5, value=0.99, step=0.01)
-        lxa, lya = "auto", "auto"
-    
-    st.markdown("---")
-    st.header("📄 Export Full Report")
-    components.html("""<button onclick="window.parent.print();" style="background-color:#FF4B4B; color:white; border:none; border-radius:4px; padding:0.5rem 1rem; font-size:1rem; font-weight:600; cursor:pointer; width:100%;">🖨️ Save Page as PDF</button>""", height=50)
-    st.markdown("<div style='text-align: center; margin-top: 50px;'><p style='color: #888888; font-size: 0.85rem; font-family: sans-serif;'>Developed by<br><b>PhD(c) Carlos A. Torres-Ramírez</b><br><br></p></div>", unsafe_allow_html=True)
 
 # ============================================================
 # APP UPLOADER & MAIN LOGIC
