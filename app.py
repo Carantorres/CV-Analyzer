@@ -17,7 +17,8 @@ from streamlit_sortables import sort_items
 # PAGE CONFIGURATION
 # ============================================================
 st.set_page_config(page_title="SPARK Analyzer", layout="wide")
-st.title("⚡ SPARK: System for Potentiostat Analysis & Research Knowledge")
+st.title("⚡ SPARK")
+st.markdown("### System for Potentiostat Analysis & Research Knowledge")
 
 st.markdown("""
 **A comprehensive tool for automated chemical and electrochemical data analysis.** 
@@ -37,17 +38,12 @@ with st.popover("📖 View Calculation Methods & Algorithms"):
     **3. Averaging & Statistical Analysis**
     *   **Cycle Averaging:** Individual scans are mapped and interpolated over a normalized coordinate system to produce unified trendlines.
 
-    **4. Scan Rate Kinetics ($b$-value Smart Detection)**
-    *   Uses `scipy.signal.find_peaks` to identify true mathematical local maxima.
-    *   A linear regression of $\\log_{10}(j_{pa})$ vs $\\log_{10}(v)$ calculates the slope $b$.
-    
-    **5. Electrochemical Impedance Spectroscopy (EIS)**
-    *   **Nyquist & Bode Plots:** Renders $-Z''$ vs $Z'$ (1:1 ratio), Bode $|Z|$, and Bode Phase natively.
-    *   **Equivalent Circuit Fitting:** Applies Non-Linear Least Squares (CNLS) with **Modulus Weighting** ($\\sigma = |Z|$) to ensure accurate fitting across all impedance magnitudes. Generates a high-density synthetic curve for continuous publication-ready lines. Supports 8 different literature-backed UOR models with dynamic initial parameter estimation for robust convergence on complex multi-loop systems.
+    **4. Electrochemical Impedance Spectroscopy (EIS)**
+    *   **Equivalent Circuit Fitting:** Applies Non-Linear Least Squares (CNLS) with **Modulus Weighting** ($\\sigma = |Z|$) to ensure accurate fitting across all impedance magnitudes. Generates a high-density synthetic curve for continuous publication-ready lines. 
     *   **Frequency Cropping:** Allows discarding non-stationary low/high frequency data (e.g., gas bubble noise) that violates Kramers-Kronig validity before fitting.
     
-    **6. Chemical Speciation (Medusa)**
-    *   Parses tabular data exported from Medusa software to generate high-quality fractional distribution diagrams.
+    **5. Chemical Speciation (Medusa)**
+    *   Features a custom reverse-engineering algorithm that reads raw `.plt` vector files and maps screen coordinates back to chemical thermodynamic data (Log Conc / Fraction vs pH) to generate high-quality plots.
     """)
 
 st.markdown("---")
@@ -61,7 +57,7 @@ with st.sidebar:
         "Select default parser:",
         ["Gamry 1010B (.DTA)", "Biologic SP-50e (.mpt)", "PalmSens PSTrace (.csv)"]
     )
-    st.info("💡 Tip: PalmSens, CP and Medusa files are auto-detected!")
+    st.info("💡 Tip: PalmSens, CP and Medusa (.plt) files are auto-detected!")
 
 # ============================================================
 # UTILITIES & MATH
@@ -284,7 +280,11 @@ def extract_limits_from_data(df: pd.DataFrame, technique: str) -> Tuple[float, f
     Ecol = "Vf" if "Vf" in df.columns else ("Vu" if "Vu" in df.columns else (df.columns[0] if len(df.columns)>0 else None))
     if Ecol is None or Ecol not in df.columns: return None, None, None
     
-    v_data = df[Ecol].dropna().values
+    col_data = df[Ecol]
+    if isinstance(col_data, pd.DataFrame):
+        col_data = col_data.iloc[:, 0]
+        
+    v_data = pd.to_numeric(col_data, errors='coerce').dropna().values
     if len(v_data) == 0: return None, None, None
         
     vinit = round(float(v_data[0]), 3)
@@ -452,6 +452,58 @@ def apply_scientific_style(fig, is_scientific, lx, ly, lxa, lya):
 # ============================================================
 # PARSERS
 # ============================================================
+def parse_medusa_plt(raw: bytes) -> Tuple[Dict[str, str], List[Tuple[str, pd.DataFrame]]]:
+    text = raw.decode('utf-8', errors='ignore')
+    lines = text.splitlines()
+    
+    meta = {"TECHNIQUE": "Chemical Speciation (Medusa)"}
+    curves = []
+    
+    x_low, x_high, y_low, y_high = 0.0, 14.0, -10.0, 0.0
+    
+    for line in lines[:50]:
+        if "X/Y low and high:" in line:
+            parts = line.split(":")[-1].split()
+            if len(parts) >= 4:
+                x_low, x_high, y_low, y_high = map(float, parts[:4])
+                
+    parsing_curves = False
+    current_curve = None
+    current_data = []
+    
+    for line in lines:
+        line = line.strip()
+        if "-- CURVES --" in line:
+            parsing_curves = True
+            continue
+        if parsing_curves and "-- LABELS ON CURVES --" in line:
+            break
+            
+        if parsing_curves:
+            if line.startswith("5"):
+                if current_curve and current_data:
+                    df = pd.DataFrame(current_data, columns=["x_px", "y_px"])
+                    df["x"] = x_low + (df["x_px"] - 263) / (1763 - 263) * (x_high - x_low)
+                    df["y"] = y_low + (df["y_px"] - 140) / (1140 - 140) * (y_high - y_low)
+                    curves.append((current_curve, df[["x", "y"]].copy()))
+                
+                parts = line.split(maxsplit=2)
+                if len(parts) >= 3:
+                    current_curve = parts[2].strip()
+                    current_data = []
+            else:
+                m = re.match(r"^([01])\s*(\d+)\s+(\d+)$", line)
+                if m:
+                    current_data.append([float(m.group(2)), float(m.group(3))])
+                    
+    if current_curve and current_data:
+        df = pd.DataFrame(current_data, columns=["x_px", "y_px"])
+        df["x"] = x_low + (df["x_px"] - 263) / (1763 - 263) * (x_high - x_low)
+        df["y"] = y_low + (df["y_px"] - 140) / (1140 - 140) * (y_high - y_low)
+        curves.append((current_curve, df[["x", "y"]].copy()))
+        
+    return meta, curves
+
 def parse_gamry_dta_multi_curve(raw: str) -> Tuple[Dict[str, str], List[Tuple[str, pd.DataFrame]]]:
     lines = raw.splitlines()
     meta: Dict[str, str] = {}
@@ -510,7 +562,6 @@ def parse_gamry_dta_multi_curve(raw: str) -> Tuple[Dict[str, str], List[Tuple[st
             for c in df.columns: df[c] = pd.to_numeric(df[c].astype(str).str.replace(",", ".", regex=False).str.strip(), errors="coerce")
             df = df.replace([np.inf, -np.inf], np.nan).dropna(how="all").reset_index(drop=True)
             
-            # Rename columns to standardized app format
             col_map = {}
             for c in df.columns:
                 cu = c.upper()
@@ -522,7 +573,6 @@ def parse_gamry_dta_multi_curve(raw: str) -> Tuple[Dict[str, str], List[Tuple[st
                 elif cu in ["T", "TIME"]: col_map[c] = "Time"
             df = df.rename(columns=col_map)
 
-            # Fix Gamry native Zimag (which is strictly imaginary, we want it inverted for standard Nyquist)
             if "neg_Z_imag" in df.columns and any("Zimag" in c for c in cols):
                 df["neg_Z_imag"] = -df["neg_Z_imag"]
                 
@@ -634,7 +684,6 @@ def parse_pstrace_csv(raw: bytes) -> Tuple[Dict[str, str], List[Tuple[str, pd.Da
     for enc in ['utf-8', 'utf-16', 'latin1']:
         try:
             text = raw.decode(enc)
-            if "Fraction" in text or "fraction" in text or "pH" in text: break
             if "Linear Sweep" in text or "Cyclic Voltammetry" in text or "Impedance" in text or "Chronopotentiometry" in text or "CP" in text: break
         except: continue
     if not text: return {}, []
@@ -645,29 +694,7 @@ def parse_pstrace_csv(raw: bytes) -> Tuple[Dict[str, str], List[Tuple[str, pd.Da
     scan_names = []
     unit_row_idx = -1
     
-    is_eis, is_cp, is_medusa = False, False, False
-    
-    if any("Fraction" in l or "fraction" in l for l in lines[:10]):
-        meta["TECHNIQUE"] = "Chemical Speciation (Medusa)"
-        is_medusa = True
-        
-        header_idx = -1
-        for i, line in enumerate(lines[:20]):
-            if "pH" in line or "Fraction" in line:
-                header_idx = i
-                break
-        
-        if header_idx != -1:
-            delimiter = "\t" if "\t" in lines[header_idx] else ","
-            df = pd.read_csv(io.StringIO(text), sep=delimiter, header=header_idx)
-            df = df.replace([np.inf, -np.inf], np.nan).dropna(axis=1, how='all')
-            
-            x_col = df.columns[0] 
-            for c in df.columns[1:]:
-                df_clean = df[[x_col, c]].dropna().copy()
-                df_clean.columns = ["x", "y"]
-                curves.append((c.strip(), df_clean))
-        return meta, curves
+    is_eis, is_cp = False, False
 
     for line in lines[:20]:
         if "Linear Sweep" in line or "LSV" in line: meta["TECHNIQUE"] = "Linear Sweep Voltammetry (LSV)"
@@ -802,75 +829,7 @@ def convert_df_to_excel(curves_list: List[Tuple[str, pd.DataFrame]]) -> bytes:
 # ============================================================
 # APP UPLOADER & MAIN LOGIC
 # ============================================================
-with st.sidebar:
-    st.markdown("---")
-    st.header("⚡ iR Drop Compensation")
-    apply_ir = st.toggle("Apply iR Compensation", value=False)
-    ru_ohms = st.number_input("Uncompensated Resistance (Ru) [Ohms]", value=10.0, step=1.0) if apply_ir else 0.0
-    comp_percent = st.slider("Compensation Percentage (%)", 0, 100, 85, 1) if apply_ir else 0.0
-
-    st.markdown("---")
-    st.header("⚖️ Reference Electrode & RHE")
-    ref_elec = st.selectbox("Reference Electrode", ["Ag/AgCl (sat. KCl)", "SCE (sat. KCl)", "Hg/HgO (1M KOH)", "Custom"])
-    custom_ref_name = st.text_input("Custom Reference Label", value="Ref.") if ref_elec == "Custom" else ref_elec.split(" (")[0]
-        
-    convert_to_rhe = st.toggle("Convert E to RHE scale", value=True)
-    if convert_to_rhe:
-        e0_ref = st.number_input("Custom E0_Ref (V)", value=0.000, step=0.01) if ref_elec == "Custom" else (0.197 if ref_elec.startswith("Ag") else (0.241 if ref_elec.startswith("SCE") else 0.098))
-        if ref_elec != "Custom": st.info(f"Using Standard E₀ = {e0_ref} V")
-        ph_val = st.number_input("pH of the solution", value=14.0, step=0.1)
-        x_axis_label = "E (V vs RHE)" + (" [iR corrected]" if apply_ir else "")
-    else:
-        e0_ref, ph_val = 0.0, 0.0
-        x_axis_label = f"E (V vs {custom_ref_name})" + (" [iR corrected]" if apply_ir else "")
-
-    st.markdown("---")
-    st.header("⚙️ Catalytic Parameters")
-    electrode_area = st.number_input("Electrode Area (cm²)", min_value=0.00001, value=1.00000, step=0.001, format="%.5f")
-    manual_scan_rate = st.number_input("Manual Scan Rate (mV/s) [Optional]", value=0.0, step=10.0)
-    e_rev = st.number_input("Thermodynamic Potential (E_rev)", value=0.000, step=0.01)
-
-    st.markdown("---")
-    st.header("🔋 Peak Search (Kinetics)")
-    limit_peak_search = st.toggle("Limit Peak Search Window", value=False)
-    if limit_peak_search:
-        c_min, c_max = st.columns(2)
-        with c_min: peak_min_v = st.number_input("Min E (V)", value=0.20, step=0.05)
-        with c_max: peak_max_v = st.number_input("Max E (V)", value=0.60, step=0.05)
-    else:
-        peak_min_v, peak_max_v = None, None
-        
-    st.markdown("---")
-    st.header("✂️ EIS Frequency Cropping")
-    crop_eis = st.toggle("Limit Frequency Range", value=False, help="Discard noisy data at very low or high frequencies before fitting (e.g. gas bubble noise at low Hz).")
-    if crop_eis:
-        c_fmin, c_fmax = st.columns(2)
-        with c_fmin: eis_min_f = st.number_input("Min Freq (Hz)", value=0.05, format="%.3f")
-        with c_fmax: eis_max_f = st.number_input("Max Freq (Hz)", value=100000.0, step=1000.0)
-    else:
-        eis_min_f, eis_max_f = 1e-9, 1e9
-
-    st.markdown("---")
-    st.header("🎨 Plot Formatting")
-    scientific_style = st.toggle("Scientific Paper Style (ACS/Elsevier)", value=True)
-    show_sd_shadow = st.toggle("Show SD Shadow on Averages", value=True)
-    leg_pos = st.selectbox("Quick Positions", ["Top-Right", "Top-Left", "Bottom-Right", "Bottom-Left", "Outside Right", "Custom..."])
-    if leg_pos == "Top-Right": lx, ly, lxa, lya = 0.99, 0.99, "right", "top"
-    elif leg_pos == "Top-Left": lx, ly, lxa, lya = 0.01, 0.99, "left", "top"
-    elif leg_pos == "Bottom-Right": lx, ly, lxa, lya = 0.99, 0.01, "right", "bottom"
-    elif leg_pos == "Bottom-Left": lx, ly, lxa, lya = 0.01, 0.01, "left", "bottom"
-    elif leg_pos == "Outside Right": lx, ly, lxa, lya = 1.02, 1.0, "left", "top"
-    else:
-        lx = st.slider("X Coordinate", min_value=-0.2, max_value=1.5, value=0.99, step=0.01)
-        ly = st.slider("Y Coordinate", min_value=-0.2, max_value=1.5, value=0.99, step=0.01)
-        lxa, lya = "auto", "auto"
-    
-    st.markdown("---")
-    st.header("📄 Export Full Report")
-    components.html("""<button onclick="window.parent.print();" style="background-color:#FF4B4B; color:white; border:none; border-radius:4px; padding:0.5rem 1rem; font-size:1rem; font-weight:600; cursor:pointer; width:100%;">🖨️ Save Page as PDF</button>""", height=50)
-    st.markdown("<div style='text-align: center; margin-top: 50px;'><p style='color: #888888; font-size: 0.85rem; font-family: sans-serif;'>Developed by<br><b>PhD(c) Carlos A. Torres-Ramírez</b><br><br></p></div>", unsafe_allow_html=True)
-
-uploaded_files = st.file_uploader("Upload CV/LSV/CP/EIS or Medusa (tabular) files", type=["csv", "CSV", "DTA", "dta", "mpt", "MPT", "txt", "TXT"], accept_multiple_files=True)
+uploaded_files = st.file_uploader("Upload CV/LSV/CP/EIS or Medusa (.plt) files", type=["csv", "CSV", "DTA", "dta", "mpt", "MPT", "txt", "TXT", "plt", "PLT"], accept_multiple_files=True)
 
 publication_palette = ['#000000', '#E41A1C', '#377EB8', '#4DAF4A', '#984EA3', '#FF7F00', '#A65628', '#F781BF'] + px.colors.qualitative.Alphabet
 combined_palette = publication_palette
@@ -923,14 +882,17 @@ if uploaded_files:
             if fname not in file_dict: continue
             raw_bytes = file_dict[fname].getvalue()
             
-            meta_sg, curves_comp = parse_pstrace_csv(raw_bytes)
-            if not curves_comp:
-                try:
-                    raw_str = raw_bytes.decode('utf-8', errors='ignore')
-                    if instrument.startswith("Gamry"): meta_sg, curves_comp = parse_gamry_dta_multi_curve(raw_str)
-                    else: meta_sg, curves_comp = parse_biologic_mpt(raw_str)
-                except Exception as e:
-                    pass
+            if fname.lower().endswith(".plt"):
+                meta_sg, curves_comp = parse_medusa_plt(raw_bytes)
+            else:
+                meta_sg, curves_comp = parse_pstrace_csv(raw_bytes)
+                if not curves_comp:
+                    try:
+                        raw_str = raw_bytes.decode('utf-8', errors='ignore')
+                        if instrument.startswith("Gamry"): meta_sg, curves_comp = parse_gamry_dta_multi_curve(raw_str)
+                        else: meta_sg, curves_comp = parse_biologic_mpt(raw_str)
+                    except Exception as e:
+                        pass
             
             tech_sg = meta_sg.get("TECHNIQUE", "")
             sr = manual_scan_rate if manual_scan_rate > 0.0 else _to_float(meta_sg.get("SCANRATE", meta_sg.get("dE/dt")))
@@ -1037,6 +999,7 @@ if uploaded_files:
                 
                 sg_lsv_params, sg_cv_kinetics, sg_eis_params = [], [], []
                 sg_max_log_I = -10
+                y_axis_label_medusa = "Fraction"
                 
                 for g_idx, g_name in enumerate(selected_groups):
                     if g_name not in prepared_group_data: continue
@@ -1100,7 +1063,6 @@ if uploaded_files:
                                     results_dict["Curve"] = tr["name"]
                                     results_dict["Model"] = selected_model.split(" [")[0] # clean name for table
                                     sg_eis_params.append(results_dict)
-                                    # Solid continuous lines for the fitting model
                                     fig_super.add_trace(go.Scatter(x=zr_sim, y=zi_sim, mode='lines', name=f"{tr['name']} Model", line=dict(color=c_color, width=2), showlegend=True, hoverinfo='skip'))
                                     z_mod_sim = np.sqrt(zr_sim**2 + zi_sim**2)
                                     phase_sim = np.degrees(np.arctan2(zi_sim, zr_sim))
@@ -1113,6 +1075,7 @@ if uploaded_files:
                             fig_super.add_trace(go.Scatter(x=tr["x"], y=tr["y"], mode='lines', name=tr["name"], line=dict(color=c_color, width=2.5)))
                         elif is_sg_medusa:
                             fig_super.add_trace(go.Scatter(x=tr["x"], y=tr["y"], mode='lines', name=tr["name"], line=dict(color=c_color, width=2.5)))
+                            if tr["y"].min() < -1.0: y_axis_label_medusa = "Log Concentration"
                         else:
                             if not is_sg_lsv and tr.get("sr") and tr["sr"] > 0:
                                 x_anodic = tr["x"][:np.argmax(tr["x"])+1] if np.argmax(tr["x"]) > 0 else tr["x"]
@@ -1203,7 +1166,7 @@ if uploaded_files:
                     fig_super = apply_scientific_style(fig_super, scientific_style, lx, ly, lxa, lya)
                     st.plotly_chart(fig_super, use_container_width=True, config=dl_config)
                 elif is_sg_medusa:
-                    fig_super.update_layout(title="Chemical Speciation" if not scientific_style else "", xaxis_title="pH", yaxis_title="Fraction", height=500)
+                    fig_super.update_layout(title="Chemical Speciation" if not scientific_style else "", xaxis_title="pH", yaxis_title=y_axis_label_medusa, height=500)
                     fig_super = apply_scientific_style(fig_super, scientific_style, lx, ly, lxa, lya)
                     st.plotly_chart(fig_super, use_container_width=True, config=dl_config)
                 else:
@@ -1214,11 +1177,11 @@ if uploaded_files:
                     if is_sg_lsv:
                         c1, c2 = st.columns(2)
                         with c1:
-                            fig_super_jeta.update_layout(title="", xaxis_title="Overpotential η (mV)", yaxis_title=j_axis_label, height=500)
+                            fig_super_jeta.update_layout(title="Catalytic Performance" if not scientific_style else "", xaxis_title="Overpotential η (mV)", yaxis_title=j_axis_label, height=500)
                             fig_super_jeta = apply_scientific_style(fig_super_jeta, scientific_style, lx, ly, lxa, lya)
                             st.plotly_chart(fig_super_jeta, use_container_width=True, config=dl_config)
                         with c2:
-                            fig_super_tafel.update_layout(title="", xaxis_title="log₁₀|I| (A)", yaxis_title=x_axis_label, xaxis=dict(range=[sg_max_log_I - 4.5, sg_max_log_I + 0.2]), height=500)
+                            fig_super_tafel.update_layout(title="Tafel Plot" if not scientific_style else "", xaxis_title="log₁₀|I| (A)", yaxis_title=x_axis_label, xaxis=dict(range=[sg_max_log_I - 4.5, sg_max_log_I + 0.2]), height=500)
                             fig_super_tafel = apply_scientific_style(fig_super_tafel, scientific_style, lx, ly, lxa, lya)
                             st.plotly_chart(fig_super_tafel, use_container_width=True, config=dl_config)
                             
@@ -1258,14 +1221,17 @@ if uploaded_files:
         file = file_dict[file_name]
         raw_bytes = file.getvalue()
         
-        meta, curves = parse_pstrace_csv(raw_bytes)
-        if not curves:
-            try:
-                raw_str = raw_bytes.decode('utf-8', errors='ignore')
-                if instrument.startswith("Gamry"): meta, curves = parse_gamry_dta_multi_curve(raw_str)
-                else: meta, curves = parse_biologic_mpt(raw_str)
-            except Exception as e:
-                pass
+        if file_name.lower().endswith(".plt"):
+            meta, curves = parse_medusa_plt(raw_bytes)
+        else:
+            meta, curves = parse_pstrace_csv(raw_bytes)
+            if not curves:
+                try:
+                    raw_str = raw_bytes.decode('utf-8', errors='ignore')
+                    if instrument.startswith("Gamry"): meta, curves = parse_gamry_dta_multi_curve(raw_str)
+                    else: meta, curves = parse_biologic_mpt(raw_str)
+                except Exception as e:
+                    pass
             
         technique = meta.get("TECHNIQUE", "Unknown Technique")
         sr = manual_scan_rate if manual_scan_rate > 0.0 else _to_float(meta.get("SCANRATE", meta.get("dE/dt")))
@@ -1301,6 +1267,8 @@ if uploaded_files:
             c4.metric("Scan Rate", f"{sr} mV/s" if sr is not None else "N/A")
 
         processed_curves = []
+        y_axis_label_medusa_ind = "Fraction"
+        
         for i, (cid, dfi) in enumerate(curves):
             if is_eis:
                 if "Z_real" in dfi.columns and "neg_Z_imag" in dfi.columns:
@@ -1316,6 +1284,7 @@ if uploaded_files:
                     dd.columns = ["x", "y"]
                     if len(dd) >= 2: processed_curves.append((cid, dd))
             elif is_medusa:
+                if dfi["y"].min() < -1.0: y_axis_label_medusa_ind = "Log Concentration"
                 processed_curves.append((cid, dfi))
             else:
                 Ecol = "Vf" if "Vf" in dfi.columns else ("Vu" if "Vu" in dfi.columns else None)
@@ -1414,7 +1383,7 @@ if uploaded_files:
             y_title = x_axis_label
         elif is_medusa:
             x_title = "pH"
-            y_title = "Fraction"
+            y_title = y_axis_label_medusa_ind
         else:
             x_title = x_axis_label
             y_title = i_axis_label
