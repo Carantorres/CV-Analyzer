@@ -43,7 +43,7 @@ with st.popover("📖 View Calculation Methods & Algorithms"):
     
     **5. Electrochemical Impedance Spectroscopy (EIS)**
     *   **Nyquist & Bode Plots:** Renders $-Z''$ vs $Z'$ (1:1 ratio), Bode $|Z|$, and Bode Phase natively.
-    *   **Equivalent Circuit Fitting:** Applies Non-Linear Least Squares (CNLS) with **Modulus Weighting** ($\\sigma = |Z|$) to ensure accurate fitting across all impedance magnitudes (critical for capturing low-frequency inductive loops). Generates a high-density synthetic curve for continuous publication-ready lines.
+    *   **Equivalent Circuit Fitting:** Applies Non-Linear Least Squares (CNLS) with **Modulus Weighting** ($\\sigma = |Z|$) to ensure accurate fitting across all impedance magnitudes. Generates a high-density synthetic curve for continuous publication-ready lines. Supports 5 different UOR models including Inductive and Adsorption Pseudocapacitance loops.
     """)
 
 st.markdown("---")
@@ -138,7 +138,20 @@ def fit_uor_eis(f, zr, zi, model_type):
             return np.hstack([Z_total.real, -Z_total.imag])
         p0 = [1e-4, 0.8, Rct_guess]
         bounds = ([1e-9, 0.5, 0], [1.0, 1.0, 1e7])
-        param_names = ["CPE-T (F s^(n-1))", "CPE-P (n)", "Rct (Ω)"]
+        param_names = ["CPE-T", "CPE-P", "Rct (Ω)"]
+        
+    elif model_type == "Two Time Constants: Rs-(CPE1||R1)-(CPE2||R2)":
+        def obj(f_val, CPE1_T, CPE1_P, R1, CPE2_T, CPE2_P, R2):
+            w = 2 * np.pi * f_val
+            Z_CPE1 = 1.0 / (CPE1_T * (1j * w)**CPE1_P)
+            Z_CPE2 = 1.0 / (CPE2_T * (1j * w)**CPE2_P)
+            Z_1 = 1.0 / (1.0/Z_CPE1 + 1.0/R1)
+            Z_2 = 1.0 / (1.0/Z_CPE2 + 1.0/R2)
+            Z_total = Rs_fixed + Z_1 + Z_2
+            return np.hstack([Z_total.real, -Z_total.imag])
+        p0 = [1e-5, 0.8, Rct_guess*0.1, 1e-3, 0.8, Rct_guess*0.9]
+        bounds = ([1e-9, 0.5, 0, 1e-9, 0.5, 0], [1.0, 1.0, 1e7, 1.0, 1.0, 1e7])
+        param_names = ["CPE1-T", "CPE1-P", "R1 (Ω)", "CPE2-T", "CPE2-P", "R2 (Ω)"]
         
     elif model_type == "Parallel Adsorption: Rs-(CPE||(Rct||(RL+L)))":
         def obj(f_val, CPE_T, CPE_P, Rct, RL, L):
@@ -150,7 +163,7 @@ def fit_uor_eis(f, zr, zi, model_type):
             return np.hstack([Z_total.real, -Z_total.imag])
         p0 = [1e-4, 0.8, Rct_guess, Rct_guess*0.5, 1000]
         bounds = ([1e-9, 0.5, 0, 0, 1e-5], [1.0, 1.0, 1e7, 1e7, 1e8])
-        param_names = ["CPE-T (F s^(n-1))", "CPE-P (n)", "Rct (Ω)", "RL (Ω)", "L (H)"]
+        param_names = ["CPE-T", "CPE-P", "Rct (Ω)", "RL (Ω)", "L (H)"]
         
     elif model_type == "Series Adsorption: Rs-(CPE||(Rct+(RL||L)))":
         def obj(f_val, CPE_T, CPE_P, Rct, RL, L):
@@ -163,7 +176,20 @@ def fit_uor_eis(f, zr, zi, model_type):
             return np.hstack([Z_total.real, -Z_total.imag])
         p0 = [1e-4, 0.8, Rct_guess, Rct_guess*0.5, 1000]
         bounds = ([1e-9, 0.5, 0, -1e7, 1e-5], [1.0, 1.0, 1e7, 1e7, 1e8])
-        param_names = ["CPE-T (F s^(n-1))", "CPE-P (n)", "Rct (Ω)", "RL (Ω)", "L (H)"]
+        param_names = ["CPE-T", "CPE-P", "Rct (Ω)", "RL (Ω)", "L (H)"]
+        
+    elif model_type == "Adsorption Capacitance: Rs-(CPE1||(Rct+(CPE2||Rads)))":
+        def obj(f_val, CPE1_T, CPE1_P, Rct, CPE2_T, CPE2_P, Rads):
+            w = 2 * np.pi * f_val
+            Z_CPE1 = 1.0 / (CPE1_T * (1j * w)**CPE1_P)
+            Z_CPE2 = 1.0 / (CPE2_T * (1j * w)**CPE2_P)
+            Z_ads = 1.0 / (1.0/Z_CPE2 + 1.0/Rads)
+            Z_faradaic = Rct + Z_ads
+            Z_total = Rs_fixed + 1.0 / (1.0/Z_CPE1 + 1.0/Z_faradaic)
+            return np.hstack([Z_total.real, -Z_total.imag])
+        p0 = [1e-5, 0.8, Rct_guess*0.5, 1e-3, 0.9, Rct_guess*0.5]
+        bounds = ([1e-9, 0.5, 0, 1e-9, 0.5, 0], [1.0, 1.0, 1e7, 1.0, 1.0, 1e7])
+        param_names = ["CPE1-T", "CPE1-P", "Rct (Ω)", "CPE2-T", "CPE2-P", "Rads (Ω)"]
         
     try:
         popt, pcov = curve_fit(obj, f, y_data, p0=p0, bounds=bounds, sigma=sigma, maxfev=100000)
@@ -797,7 +823,13 @@ if uploaded_files:
                     with col_model:
                         eis_model_selection = st.selectbox(
                             "Select Equivalent Circuit:", 
-                            ["Randles: Rs-(CPE||Rct)", "Parallel Adsorption: Rs-(CPE||(Rct||(RL+L)))", "Series Adsorption: Rs-(CPE||(Rct+(RL||L)))"], 
+                            [
+                                "Randles: Rs-(CPE||Rct)", 
+                                "Two Time Constants: Rs-(CPE1||R1)-(CPE2||R2)",
+                                "Parallel Adsorption: Rs-(CPE||(Rct||(RL+L)))", 
+                                "Series Adsorption: Rs-(CPE||(Rct+(RL||L)))",
+                                "Adsorption Capacitance: Rs-(CPE1||(Rct+(CPE2||Rads)))"
+                            ], 
                             key=f"eis_model_sel_{sg}",
                             disabled=not fit_eis_model_toggle
                         )
@@ -861,11 +893,12 @@ if uploaded_files:
                                 if results_dict is not None:
                                     results_dict["Curve"] = tr["name"]
                                     sg_eis_params.append(results_dict)
-                                    fig_super.add_trace(go.Scatter(x=zr_sim, y=zi_sim, mode='lines', line=dict(color=c_color, width=2, dash='dash'), showlegend=False))
+                                    # Plotting smooth simulated fit curve
+                                    fig_super.add_trace(go.Scatter(x=zr_sim, y=zi_sim, mode='lines', line=dict(color=c_color, width=2, dash='dash'), showlegend=False, hoverinfo='skip'))
                                     z_mod_sim = np.sqrt(zr_sim**2 + zi_sim**2)
                                     phase_sim = np.degrees(np.arctan2(zi_sim, zr_sim))
-                                    fig_bode_mod.add_trace(go.Scatter(x=f_sim, y=z_mod_sim, mode='lines', line=dict(color=c_color, width=2, dash='dash'), showlegend=False))
-                                    fig_bode_phase.add_trace(go.Scatter(x=f_sim, y=phase_sim, mode='lines', line=dict(color=c_color, width=2, dash='dash'), showlegend=False))
+                                    fig_bode_mod.add_trace(go.Scatter(x=f_sim, y=z_mod_sim, mode='lines', line=dict(color=c_color, width=2, dash='dash'), showlegend=False, hoverinfo='skip'))
+                                    fig_bode_phase.add_trace(go.Scatter(x=f_sim, y=phase_sim, mode='lines', line=dict(color=c_color, width=2, dash='dash'), showlegend=False, hoverinfo='skip'))
                         else:
                             if not is_sg_lsv and tr.get("sr") and tr["sr"] > 0:
                                 x_anodic = tr["x"][:np.argmax(tr["x"])+1] if np.argmax(tr["x"]) > 0 else tr["x"]
@@ -938,9 +971,16 @@ if uploaded_files:
                     if fit_eis_model_toggle and sg_eis_params:
                         st.markdown(f"#### ⚡ Equivalent Circuit Fit Results `[{eis_model_selection}]`")
                         df_eis = pd.DataFrame(sg_eis_params)
-                        cols = ["Curve", "Rs (Ω)", "CPE-T (F s^(n-1))", "CPE-P (n)", "Rct (Ω)", "RL (Ω)", "L (H)", "R²", "χ²"]
+                        cols = ["Curve", "Rs (Ω)", "CPE-T", "CPE-P", "Rct (Ω)", "RL (Ω)", "L (H)", "CPE1-T", "CPE1-P", "R1 (Ω)", "CPE2-T", "CPE2-P", "R2 (Ω)", "Rads (Ω)", "R²", "χ²"]
                         df_eis = df_eis[[c for c in cols if c in df_eis.columns]]
-                        format_dict = {"Rs (Ω)": "{:.2f}", "CPE-T (F s^(n-1))": "{:.2e}", "CPE-P (n)": "{:.3f}", "Rct (Ω)": "{:.2f}", "RL (Ω)": "{:.2f}", "L (H)": "{:.2e}", "R²": "{:.4f}", "χ²": "{:.2e}"}
+                        
+                        format_dict = {
+                            "Rs (Ω)": "{:.2f}", "CPE-T": "{:.2e}", "CPE-P": "{:.3f}", 
+                            "Rct (Ω)": "{:.2f}", "RL (Ω)": "{:.2f}", "L (H)": "{:.2e}", 
+                            "CPE1-T": "{:.2e}", "CPE1-P": "{:.3f}", "R1 (Ω)": "{:.2f}", 
+                            "CPE2-T": "{:.2e}", "CPE2-P": "{:.3f}", "R2 (Ω)": "{:.2f}", "Rads (Ω)": "{:.2f}",
+                            "R²": "{:.4f}", "χ²": "{:.2e}"
+                        }
                         st.dataframe(df_eis.style.format({k:v for k,v in format_dict.items() if k in df_eis.columns}), use_container_width=True)
                 else:
                     fig_super.update_layout(title="", xaxis_title=x_axis_label, yaxis_title=i_axis_label, height=500)
