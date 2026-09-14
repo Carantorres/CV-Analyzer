@@ -49,17 +49,6 @@ with st.popover("📖 View Calculation Methods & Algorithms"):
 st.markdown("---")
 
 # ============================================================
-# SIDEBAR SETUP (TOP AREA)
-# ============================================================
-with st.sidebar:
-    st.header("🎛️ Instrument Format")
-    instrument = st.selectbox(
-        "Select default parser:",
-        ["Gamry 1010B (.DTA)", "Biologic SP-50e (.mpt)", "PalmSens PSTrace (.csv)"]
-    )
-    st.info("💡 Tip: PalmSens, CP and Medusa (.plt) files are auto-detected!")
-
-# ============================================================
 # UTILITIES & MATH
 # ============================================================
 def to_rgba(color_str: str, alpha: float = 0.2) -> str:
@@ -684,6 +673,7 @@ def parse_pstrace_csv(raw: bytes) -> Tuple[Dict[str, str], List[Tuple[str, pd.Da
     for enc in ['utf-8', 'utf-16', 'latin1']:
         try:
             text = raw.decode(enc)
+            if "Fraction" in text or "fraction" in text or "pH" in text: break
             if "Linear Sweep" in text or "Cyclic Voltammetry" in text or "Impedance" in text or "Chronopotentiometry" in text or "CP" in text: break
         except: continue
     if not text: return {}, []
@@ -694,7 +684,29 @@ def parse_pstrace_csv(raw: bytes) -> Tuple[Dict[str, str], List[Tuple[str, pd.Da
     scan_names = []
     unit_row_idx = -1
     
-    is_eis, is_cp = False, False
+    is_eis, is_cp, is_medusa = False, False, False
+    
+    if any("Fraction" in l or "fraction" in l for l in lines[:10]):
+        meta["TECHNIQUE"] = "Chemical Speciation (Medusa)"
+        is_medusa = True
+        
+        header_idx = -1
+        for i, line in enumerate(lines[:20]):
+            if "pH" in line or "Fraction" in line:
+                header_idx = i
+                break
+        
+        if header_idx != -1:
+            delimiter = "\t" if "\t" in lines[header_idx] else ","
+            df = pd.read_csv(io.StringIO(text), sep=delimiter, header=header_idx)
+            df = df.replace([np.inf, -np.inf], np.nan).dropna(axis=1, how='all')
+            
+            x_col = df.columns[0] 
+            for c in df.columns[1:]:
+                df_clean = df[[x_col, c]].dropna().copy()
+                df_clean.columns = ["x", "y"]
+                curves.append((c.strip(), df_clean))
+        return meta, curves
 
     for line in lines[:20]:
         if "Linear Sweep" in line or "LSV" in line: meta["TECHNIQUE"] = "Linear Sweep Voltammetry (LSV)"
@@ -825,6 +837,77 @@ def convert_df_to_excel(curves_list: List[Tuple[str, pd.DataFrame]]) -> bytes:
                 seen_names.add(safe_name)
                 clean_df.to_excel(writer, index=False, sheet_name=safe_name)
     return output.getvalue()
+
+# ============================================================
+# APP SIDEBAR CONTROLS
+# ============================================================
+with st.sidebar:
+    st.markdown("---")
+    st.header("⚡ iR Drop Compensation")
+    apply_ir = st.toggle("Apply iR Compensation", value=False)
+    ru_ohms = st.number_input("Uncompensated Resistance (Ru) [Ohms]", value=10.0, step=1.0) if apply_ir else 0.0
+    comp_percent = st.slider("Compensation Percentage (%)", 0, 100, 85, 1) if apply_ir else 0.0
+
+    st.markdown("---")
+    st.header("⚖️ Reference Electrode & RHE")
+    ref_elec = st.selectbox("Reference Electrode", ["Ag/AgCl (sat. KCl)", "SCE (sat. KCl)", "Hg/HgO (1M KOH)", "Custom"])
+    custom_ref_name = st.text_input("Custom Reference Label", value="Ref.") if ref_elec == "Custom" else ref_elec.split(" (")[0]
+        
+    convert_to_rhe = st.toggle("Convert E to RHE scale", value=True)
+    if convert_to_rhe:
+        e0_ref = st.number_input("Custom E0_Ref (V)", value=0.000, step=0.01) if ref_elec == "Custom" else (0.197 if ref_elec.startswith("Ag") else (0.241 if ref_elec.startswith("SCE") else 0.098))
+        if ref_elec != "Custom": st.info(f"Using Standard E₀ = {e0_ref} V")
+        ph_val = st.number_input("pH of the solution", value=14.0, step=0.1)
+        x_axis_label = "E (V vs RHE)" + (" [iR corrected]" if apply_ir else "")
+    else:
+        e0_ref, ph_val = 0.0, 0.0
+        x_axis_label = f"E (V vs {custom_ref_name})" + (" [iR corrected]" if apply_ir else "")
+
+    st.markdown("---")
+    st.header("⚙️ Catalytic Parameters")
+    electrode_area = st.number_input("Electrode Area (cm²)", min_value=0.00001, value=1.00000, step=0.001, format="%.5f")
+    manual_scan_rate = st.number_input("Manual Scan Rate (mV/s) [Optional]", value=0.0, step=10.0)
+    e_rev = st.number_input("Thermodynamic Potential (E_rev)", value=0.000, step=0.01)
+
+    st.markdown("---")
+    st.header("🔋 Peak Search (Kinetics)")
+    limit_peak_search = st.toggle("Limit Peak Search Window", value=False)
+    if limit_peak_search:
+        c_min, c_max = st.columns(2)
+        with c_min: peak_min_v = st.number_input("Min E (V)", value=0.20, step=0.05)
+        with c_max: peak_max_v = st.number_input("Max E (V)", value=0.60, step=0.05)
+    else:
+        peak_min_v, peak_max_v = None, None
+        
+    st.markdown("---")
+    st.header("✂️ EIS Frequency Cropping")
+    crop_eis = st.toggle("Limit Frequency Range", value=False, help="Discard noisy data at very low or high frequencies before fitting (e.g. gas bubble noise at low Hz).")
+    if crop_eis:
+        c_fmin, c_fmax = st.columns(2)
+        with c_fmin: eis_min_f = st.number_input("Min Freq (Hz)", value=0.05, format="%.3f")
+        with c_fmax: eis_max_f = st.number_input("Max Freq (Hz)", value=100000.0, step=1000.0)
+    else:
+        eis_min_f, eis_max_f = 1e-9, 1e9
+
+    st.markdown("---")
+    st.header("🎨 Plot Formatting")
+    scientific_style = st.toggle("Scientific Paper Style (ACS/Elsevier)", value=True)
+    show_sd_shadow = st.toggle("Show SD Shadow on Averages", value=True)
+    leg_pos = st.selectbox("Quick Positions", ["Top-Right", "Top-Left", "Bottom-Right", "Bottom-Left", "Outside Right", "Custom..."])
+    if leg_pos == "Top-Right": lx, ly, lxa, lya = 0.99, 0.99, "right", "top"
+    elif leg_pos == "Top-Left": lx, ly, lxa, lya = 0.01, 0.99, "left", "top"
+    elif leg_pos == "Bottom-Right": lx, ly, lxa, lya = 0.99, 0.01, "right", "bottom"
+    elif leg_pos == "Bottom-Left": lx, ly, lxa, lya = 0.01, 0.01, "left", "bottom"
+    elif leg_pos == "Outside Right": lx, ly, lxa, lya = 1.02, 1.0, "left", "top"
+    else:
+        lx = st.slider("X Coordinate", min_value=-0.2, max_value=1.5, value=0.99, step=0.01)
+        ly = st.slider("Y Coordinate", min_value=-0.2, max_value=1.5, value=0.99, step=0.01)
+        lxa, lya = "auto", "auto"
+    
+    st.markdown("---")
+    st.header("📄 Export Full Report")
+    components.html("""<button onclick="window.parent.print();" style="background-color:#FF4B4B; color:white; border:none; border-radius:4px; padding:0.5rem 1rem; font-size:1rem; font-weight:600; cursor:pointer; width:100%;">🖨️ Save Page as PDF</button>""", height=50)
+    st.markdown("<div style='text-align: center; margin-top: 50px;'><p style='color: #888888; font-size: 0.85rem; font-family: sans-serif;'>Developed by<br><b>PhD(c) Carlos A. Torres-Ramírez</b><br><br></p></div>", unsafe_allow_html=True)
 
 # ============================================================
 # APP UPLOADER & MAIN LOGIC
@@ -1061,7 +1144,7 @@ if uploaded_files:
                                 results_dict, f_sim, zr_sim, zi_sim = fit_uor_eis(f_hz, zr, zi, selected_model)
                                 if results_dict is not None:
                                     results_dict["Curve"] = tr["name"]
-                                    results_dict["Model"] = selected_model.split(" [")[0] # clean name for table
+                                    results_dict["Model"] = selected_model.split(" [")[0] 
                                     sg_eis_params.append(results_dict)
                                     fig_super.add_trace(go.Scatter(x=zr_sim, y=zi_sim, mode='lines', name=f"{tr['name']} Model", line=dict(color=c_color, width=2), showlegend=True, hoverinfo='skip'))
                                     z_mod_sim = np.sqrt(zr_sim**2 + zi_sim**2)
@@ -1177,11 +1260,11 @@ if uploaded_files:
                     if is_sg_lsv:
                         c1, c2 = st.columns(2)
                         with c1:
-                            fig_super_jeta.update_layout(title="Catalytic Performance" if not scientific_style else "", xaxis_title="Overpotential η (mV)", yaxis_title=j_axis_label, height=500)
+                            fig_super_jeta.update_layout(title="", xaxis_title="Overpotential η (mV)", yaxis_title=j_axis_label, height=500)
                             fig_super_jeta = apply_scientific_style(fig_super_jeta, scientific_style, lx, ly, lxa, lya)
                             st.plotly_chart(fig_super_jeta, use_container_width=True, config=dl_config)
                         with c2:
-                            fig_super_tafel.update_layout(title="Tafel Plot" if not scientific_style else "", xaxis_title="log₁₀|I| (A)", yaxis_title=x_axis_label, xaxis=dict(range=[sg_max_log_I - 4.5, sg_max_log_I + 0.2]), height=500)
+                            fig_super_tafel.update_layout(title="", xaxis_title="log₁₀|I| (A)", yaxis_title=x_axis_label, xaxis=dict(range=[sg_max_log_I - 4.5, sg_max_log_I + 0.2]), height=500)
                             fig_super_tafel = apply_scientific_style(fig_super_tafel, scientific_style, lx, ly, lxa, lya)
                             st.plotly_chart(fig_super_tafel, use_container_width=True, config=dl_config)
                             
