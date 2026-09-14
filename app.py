@@ -17,11 +17,11 @@ from streamlit_sortables import sort_items
 # PAGE CONFIGURATION
 # ============================================================
 st.set_page_config(page_title="CV & EIS Analyzer", layout="wide")
-st.title("📊 Universal CV, LSV & EIS Analyzer")
+st.title("📊 Universal CV, LSV, CP & EIS Analyzer")
 
 st.markdown("""
 **A comprehensive tool for automated electrochemical data analysis.** 
-Seamlessly process CV, LSV, and EIS files. Features robust catalytic parameter extraction, noise-free potential window detection, and equivalent circuit fitting for impedance spectroscopy.
+Seamlessly process CV, LSV, CP (Galvanostatic), and EIS files. Features robust catalytic parameter extraction, noise-free potential window detection, and equivalent circuit fitting for impedance spectroscopy.
 """)
 
 with st.popover("📖 View Calculation Methods & Algorithms"):
@@ -35,7 +35,7 @@ with st.popover("📖 View Calculation Methods & Algorithms"):
     *   **Robust Tafel Slope:** Computed using a dynamic Sliding Window algorithm, maximizing $R^2$.
 
     **3. Averaging & Statistical Analysis**
-    *   **Cycle Averaging:** Individual scans are mapped and interpolated over a normalized coordinate system.
+    *   **Cycle Averaging:** Individual scans are mapped and interpolated over a normalized coordinate system to produce unified trendlines for CVs, CPs, and EIS curves.
 
     **4. Scan Rate Kinetics ($b$-value Smart Detection)**
     *   Uses `scipy.signal.find_peaks` to identify true mathematical local maxima.
@@ -584,7 +584,7 @@ def parse_pstrace_csv(raw: bytes) -> Tuple[Dict[str, str], List[Tuple[str, pd.Da
     for enc in ['utf-8', 'utf-16', 'latin1']:
         try:
             text = raw.decode(enc)
-            if "Linear Sweep" in text or "Cyclic Voltammetry" in text or "Impedance" in text: break
+            if "Linear Sweep" in text or "Cyclic Voltammetry" in text or "Impedance" in text or "Chronopotentiometry" in text or "CP" in text: break
         except: continue
     if not text: return {}, []
         
@@ -593,7 +593,8 @@ def parse_pstrace_csv(raw: bytes) -> Tuple[Dict[str, str], List[Tuple[str, pd.Da
     curves = []
     scan_names = []
     unit_row_idx = -1
-    is_eis = False
+    
+    is_eis, is_cp = False, False
     
     for line in lines[:20]:
         if "Linear Sweep" in line or "LSV" in line: meta["TECHNIQUE"] = "Linear Sweep Voltammetry (LSV)"
@@ -601,6 +602,9 @@ def parse_pstrace_csv(raw: bytes) -> Tuple[Dict[str, str], List[Tuple[str, pd.Da
         elif "Impedance" in line or "EIS" in line: 
             meta["TECHNIQUE"] = "Electrochemical Impedance Spectroscopy (EIS)"
             is_eis = True
+        elif "Chronopotentiometry" in line or "CP E vs t" in line:
+            meta["TECHNIQUE"] = "Chronopotentiometry (CP)"
+            is_cp = True
             
     if is_eis:
         for i, line in enumerate(lines[:50]):
@@ -628,6 +632,33 @@ def parse_pstrace_csv(raw: bytes) -> Tuple[Dict[str, str], List[Tuple[str, pd.Da
             if "Z_real" in df_clean.columns and "neg_Z_imag" in df_clean.columns and "Frequency" in df_clean.columns:
                 df_clean = df_clean.dropna()
                 curves.append(("EIS Data", df_clean))
+        return meta, curves
+        
+    if is_cp:
+        for i, line in enumerate(lines[:50]):
+            cols = [p.strip() for p in line.split(",")]
+            if "s" in cols and "V" in cols:
+                unit_row_idx = i; break
+        if unit_row_idx != -1:
+            cols = [p.strip() for p in lines[unit_row_idx].split(",") if p.strip()]
+            rows = []
+            for line in lines[unit_row_idx+1:]:
+                if not line.strip(): continue
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) > len(cols): parts = parts[:len(cols)]
+                elif len(parts) < len(cols): parts += [""] * (len(cols) - len(parts))
+                rows.append(parts)
+            df = pd.DataFrame(rows, columns=cols).replace("", np.nan).dropna(axis=1, how='all')
+            for c in df.columns:
+                if c: df[c] = pd.to_numeric(df[c].astype(str).str.replace(",", "."), errors="coerce")
+            
+            df_clean = pd.DataFrame()
+            if "s" in df.columns: df_clean["Time"] = df["s"]
+            if "V" in df.columns: df_clean["Vf"] = df["V"]
+            
+            if "Time" in df_clean.columns and "Vf" in df_clean.columns:
+                df_clean = df_clean.dropna()
+                curves.append(("CP Data", df_clean))
         return meta, curves
     
     for i, line in enumerate(lines[:50]):
@@ -677,6 +708,8 @@ def convert_df_to_excel(curves_list: List[Tuple[str, pd.DataFrame]]) -> bytes:
         for cid, df in curves_list:
             if "Z_real" in df.columns and "neg_Z_imag" in df.columns:
                 clean_df = df.replace([np.inf, -np.inf], np.nan).dropna(subset=["Z_real", "neg_Z_imag"])
+            elif "Time" in df.columns and "Vf" in df.columns:
+                clean_df = df.replace([np.inf, -np.inf], np.nan).dropna(subset=["Time", "Vf"])
             else:
                 Ecol = "Vf" if "Vf" in df.columns else ("Vu" if "Vu" in df.columns else None)
                 if Ecol is None or "Im" not in df.columns: continue
@@ -696,7 +729,7 @@ def convert_df_to_excel(curves_list: List[Tuple[str, pd.DataFrame]]) -> bytes:
 # ============================================================
 # APP LOGIC
 # ============================================================
-uploaded_files = st.file_uploader("Upload CV/LSV/EIS files", type=["csv", "CSV", "DTA", "dta", "mpt", "MPT"], accept_multiple_files=True)
+uploaded_files = st.file_uploader("Upload CV/LSV/CP/EIS files", type=["csv", "CSV", "DTA", "dta", "mpt", "MPT"], accept_multiple_files=True)
 
 publication_palette = ['#000000', '#E41A1C', '#377EB8', '#4DAF4A', '#984EA3', '#FF7F00', '#A65628', '#F781BF'] + px.colors.qualitative.Alphabet
 combined_palette = publication_palette
@@ -808,7 +841,7 @@ if uploaded_files:
         valid_groups_for_super.append(group["header"])
             
         group_data_parsed = []
-        is_group_lsv, is_group_eis = False, False
+        is_group_lsv, is_group_eis, is_group_cp = False, False, False
         
         for item in group["items"]:
             fname = item.replace("⋮⋮ ", "")
@@ -828,6 +861,7 @@ if uploaded_files:
             
             if "LSV" in tech_sg: is_group_lsv = True
             if "EIS" in tech_sg: is_group_eis = True
+            if "CP" in tech_sg or "Chronopotentiometry" in tech_sg: is_group_cp = True
                 
             processed_curves = []
             for cid, df_comp in curves_comp:
@@ -835,9 +869,14 @@ if uploaded_files:
                     if "Z_real" in df_comp.columns and "neg_Z_imag" in df_comp.columns:
                         dd_comp = df_comp[["Z_real", "neg_Z_imag", "Frequency"]].replace([np.inf, -np.inf], np.nan).dropna().copy()
                         dd_comp.columns = ["x", "y", "f"]
-                        # Apply Frequency Crop Here
                         dd_comp = dd_comp[(dd_comp["f"] >= eis_min_f) & (dd_comp["f"] <= eis_max_f)]
                         if len(dd_comp) >= 5: processed_curves.append((cid, dd_comp))
+                elif "CP" in tech_sg or "Chronopotentiometry" in tech_sg:
+                    if "Time" in df_comp.columns and "Vf" in df_comp.columns:
+                        dd_comp = df_comp[["Time", "Vf"]].replace([np.inf, -np.inf], np.nan).dropna().copy()
+                        if convert_to_rhe: dd_comp["Vf"] = dd_comp["Vf"] + e0_ref + (0.0591 * ph_val)
+                        dd_comp.columns = ["x", "y"]
+                        if len(dd_comp) >= 2: processed_curves.append((cid, dd_comp))
                 else:
                     Ecol = "Vf" if "Vf" in df_comp.columns else ("Vu" if "Vu" in df_comp.columns else None)
                     if Ecol and "Im" in df_comp.columns:
@@ -857,7 +896,7 @@ if uploaded_files:
                     sr_val = get_sr_from_name(trace_name, dat['sr'] if dat['sr'] else 0.0)
                     group_plot_data.append({"x": dd_comp["x"].values, "y": dd_comp["y"].values, "f": dd_comp.get("f", pd.Series(dtype=float)).values, "std": None, "name": trace_name, "df": dd_comp, "tech": dat["tech"], "sr": sr_val})
                         
-        prepared_group_data[group['header']] = {"traces": group_plot_data, "is_lsv": is_group_lsv, "is_eis": is_group_eis}
+        prepared_group_data[group['header']] = {"traces": group_plot_data, "is_lsv": is_group_lsv, "is_eis": is_group_eis, "is_cp": is_group_cp}
 
     # --- ZONA: SUPER GROUPS ---
     st.markdown("---")
@@ -878,8 +917,9 @@ if uploaded_files:
             selected_groups = st.multiselect("Select groups to merge:", options=valid_groups_for_super, key=f"super_group_select_{sg}")
             
             if selected_groups:
-                is_sg_eis = any(prepared_group_data[g]["is_eis"] for g in selected_groups if g in prepared_group_data)
-                is_sg_lsv = any(prepared_group_data[g]["is_lsv"] for g in selected_groups if g in prepared_group_data)
+                is_sg_eis = any(prepared_group_data[g].get("is_eis", False) for g in selected_groups if g in prepared_group_data)
+                is_sg_lsv = any(prepared_group_data[g].get("is_lsv", False) for g in selected_groups if g in prepared_group_data)
+                is_sg_cp = any(prepared_group_data[g].get("is_cp", False) for g in selected_groups if g in prepared_group_data)
                 
                 avg_mode = st.radio("Super Group Mode:", ["Plot Individual Files", "Average ALL Files inside each Group"], key=f"sg_avg_{sg}", horizontal=True)
                 
@@ -928,6 +968,10 @@ if uploaded_files:
                             common_f, zr_mean, zi_mean, zr_std, zi_std = get_averaged_eis_curve([(tr["name"], tr["df"]) for tr in g_data["traces"]])
                             df_mean = pd.DataFrame({"x": zr_mean, "y": zi_mean, "f": common_f})
                             traces_to_plot = [{"x": zr_mean, "y": zi_mean, "f": common_f, "std": None, "name": sg_custom_labels[g_name], "df": df_mean, "tech": "EIS", "group": g_name}]
+                        elif is_sg_cp:
+                            E_mean, I_mean, I_std = get_averaged_curve([(tr["name"], tr["df"]) for tr in g_data["traces"]])
+                            df_mean = pd.DataFrame({"x": E_mean, "y": I_mean})
+                            traces_to_plot = [{"x": E_mean, "y": I_mean, "f": None, "std": I_std, "name": sg_custom_labels[g_name], "df": df_mean, "tech": "CP", "sr": 0.0, "group": g_name}]
                         else:
                             E_mean, I_mean, I_std = get_averaged_curve([(tr["name"], tr["df"]) for tr in g_data["traces"]])
                             df_mean = pd.DataFrame({"x": E_mean, "y": I_mean})
@@ -947,7 +991,6 @@ if uploaded_files:
                         
                         if is_sg_eis:
                             zr, zi, f_hz = tr["x"], tr["y"], tr["f"]
-                            # Scatter plots for experimental data
                             fig_super.add_trace(go.Scatter(x=zr, y=zi, mode='markers', name=tr["name"], marker=dict(color=c_color, size=6)))
                             
                             z_mod = np.sqrt(zr**2 + zi**2)
@@ -963,12 +1006,16 @@ if uploaded_files:
                                     results_dict["Curve"] = tr["name"]
                                     results_dict["Model"] = selected_model.split(" [")[0] # clean name for table
                                     sg_eis_params.append(results_dict)
-                                    # Continuous solid line for fitting
                                     fig_super.add_trace(go.Scatter(x=zr_sim, y=zi_sim, mode='lines', name=f"{tr['name']} Model", line=dict(color=c_color, width=2), showlegend=True, hoverinfo='skip'))
                                     z_mod_sim = np.sqrt(zr_sim**2 + zi_sim**2)
                                     phase_sim = np.degrees(np.arctan2(zi_sim, zr_sim))
                                     fig_bode_mod.add_trace(go.Scatter(x=f_sim, y=z_mod_sim, mode='lines', name=f"{tr['name']} Model", line=dict(color=c_color, width=2), showlegend=True, hoverinfo='skip'))
                                     fig_bode_phase.add_trace(go.Scatter(x=f_sim, y=phase_sim, mode='lines', name=f"{tr['name']} Model", line=dict(color=c_color, width=2), showlegend=True, hoverinfo='skip'))
+                        elif is_sg_cp:
+                            if tr.get("std") is not None and show_sd_shadow:
+                                fig_super.add_trace(go.Scatter(x=tr["x"], y=tr["y"]+tr["std"], mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
+                                fig_super.add_trace(go.Scatter(x=tr["x"], y=tr["y"]-tr["std"], mode='lines', line=dict(width=0), fill='tonexty', fillcolor=to_rgba(c_color, 0.2), showlegend=False, hoverinfo='skip'))
+                            fig_super.add_trace(go.Scatter(x=tr["x"], y=tr["y"], mode='lines', name=tr["name"], line=dict(color=c_color, width=2.5)))
                         else:
                             if not is_sg_lsv and tr.get("sr") and tr["sr"] > 0:
                                 x_anodic = tr["x"][:np.argmax(tr["x"])+1] if np.argmax(tr["x"]) > 0 else tr["x"]
@@ -1054,6 +1101,10 @@ if uploaded_files:
                             "Rads (Ω)": "{:.2f}", "R²": "{:.4f}", "χ²": "{:.2e}"
                         }
                         st.dataframe(df_eis.style.format({k:v for k,v in format_dict.items() if k in df_eis.columns}), use_container_width=True)
+                elif is_sg_cp:
+                    fig_super.update_layout(title="Galvanostatic Charge-Discharge" if not scientific_style else "", xaxis_title="Time t (s)", yaxis_title=x_axis_label, height=500)
+                    fig_super = apply_scientific_style(fig_super, scientific_style, lx, ly, lxa, lya)
+                    st.plotly_chart(fig_super, use_container_width=True, config=dl_config)
                 else:
                     fig_super.update_layout(title="", xaxis_title=x_axis_label, yaxis_title=i_axis_label, height=500)
                     fig_super = apply_scientific_style(fig_super, scientific_style, lx, ly, lxa, lya)
@@ -1117,7 +1168,8 @@ if uploaded_files:
 
         vinit, vlim1, vlim2 = None, None, None
         is_eis = "EIS" in technique
-        if not is_eis: vinit, vlim1, vlim2 = extract_limits_from_data(curves[0][1], technique)
+        is_cp = "CP" in technique or "Chronopotentiometry" in technique
+        if not is_eis and not is_cp: vinit, vlim1, vlim2 = extract_limits_from_data(curves[0][1], technique)
 
         st.markdown(f"### {file.name}")
         col_title, col_btn = st.columns([4, 1])
@@ -1126,6 +1178,8 @@ if uploaded_files:
         
         if is_eis:
             st.info("💡 **Electrochemical Impedance Spectroscopy (EIS) Data:** Generating Nyquist Plot (-Z'' vs Z')")
+        elif is_cp:
+            st.info("💡 **Chronopotentiometry (CP) Data:** Generating Galvanostatic Plot (E vs t)")
         else:
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Initial Potential", f"{vinit} V" if vinit is not None else "N/A")
@@ -1143,9 +1197,14 @@ if uploaded_files:
                 if "Z_real" in dfi.columns and "neg_Z_imag" in dfi.columns:
                     dd = dfi[["Z_real", "neg_Z_imag", "Frequency"]].replace([np.inf, -np.inf], np.nan).dropna().copy()
                     dd.columns = ["x", "y", "f"]
-                    # Apply Frequency Crop Here
                     dd = dd[(dd["f"] >= eis_min_f) & (dd["f"] <= eis_max_f)]
                     if len(dd) >= 5: processed_curves.append((cid, dd))
+            elif is_cp:
+                if "Time" in dfi.columns and "Vf" in dfi.columns:
+                    dd = dfi[["Time", "Vf"]].replace([np.inf, -np.inf], np.nan).dropna().copy()
+                    if convert_to_rhe: dd["Vf"] = dd["Vf"] + e0_ref + (0.0591 * ph_val)
+                    dd.columns = ["x", "y"]
+                    if len(dd) >= 2: processed_curves.append((cid, dd))
             else:
                 Ecol = "Vf" if "Vf" in dfi.columns else ("Vu" if "Vu" in dfi.columns else None)
                 if Ecol is None or "Im" not in dfi.columns: continue
@@ -1167,6 +1226,13 @@ if uploaded_files:
                 common_f, zr_mean, zi_mean, zr_std, zi_std = get_averaged_eis_curve(processed_curves)
                 mean_color = combined_palette[0]
                 fig.add_trace(go.Scatter(x=zr_mean, y=zi_mean, mode='markers', name='Average', marker=dict(color=mean_color, size=6)))
+            elif is_cp:
+                E_mean, I_mean, I_std = get_averaged_curve(processed_curves)
+                mean_color = combined_palette[0]
+                if show_sd_shadow:
+                    fig.add_trace(go.Scatter(x=E_mean, y=I_mean + I_std, mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
+                    fig.add_trace(go.Scatter(x=E_mean, y=I_mean - I_std, mode='lines', line=dict(width=0), fill='tonexty', fillcolor=to_rgba(mean_color, 0.2), showlegend=False, hoverinfo='skip'))
+                fig.add_trace(go.Scatter(x=E_mean, y=I_mean, mode='lines', name='Average', line=dict(color=mean_color, width=2.5)))
             else:
                 E_mean, I_mean, I_std = get_averaged_curve(processed_curves)
                 mean_color = combined_palette[0]
@@ -1204,6 +1270,8 @@ if uploaded_files:
                 line_color = combined_palette[i % len(combined_palette)]
                 if is_eis:
                     fig.add_trace(go.Scatter(x=dd["x"], y=dd["y"], mode='markers', name=cid, marker=dict(color=line_color, size=6)))
+                elif is_cp:
+                    fig.add_trace(go.Scatter(x=dd["x"], y=dd["y"], mode='lines', name=cid, line=dict(color=line_color, width=2)))
                 else:
                     fig.add_trace(go.Scatter(x=dd["x"], y=dd["y"], mode='lines', name=cid, line=dict(color=line_color, width=2)))
                     out = recommend_operating_ranges_for_curve(dd)
@@ -1224,16 +1292,25 @@ if uploaded_files:
                                 fig_tafel.add_trace(go.Scatter(x=fit_x, y=fit_data["slope"]*fit_x + fit_data["intercept"], mode='lines', name=f"Fit: {cat_params['Tafel Slope (mV/dec)']:.1f} mV/dec", line=dict(color=line_color, width=2, dash='dot')))
                             fig_jeta.add_trace(go.Scatter(x=fit_data["eta_mV"], y=fit_data["j_dens"], mode='lines', name=cid, line=dict(color=line_color, width=2)))
 
-        x_title = "Z' (Ω)" if is_eis else x_axis_label
-        y_title = "-Z'' (Ω)" if is_eis else i_axis_label
-        fig.update_layout(title="Nyquist Plot" if is_eis else "Raw Data" if not scientific_style else "", xaxis_title=x_title, yaxis_title=y_title, height=500)
+        if is_eis:
+            x_title = "Z' (Ω)"
+            y_title = "-Z'' (Ω)"
+        elif is_cp:
+            x_title = "Time t (s)"
+            y_title = x_axis_label
+        else:
+            x_title = x_axis_label
+            y_title = i_axis_label
+            
+        title_txt = "Nyquist Plot" if is_eis else "Galvanostatic Charge-Discharge" if is_cp else "Raw Data" if not scientific_style else ""
+        fig.update_layout(title=title_txt, xaxis_title=x_title, yaxis_title=y_title, height=500)
         
         if is_eis: fig.update_yaxes(scaleanchor="x", scaleratio=1)
             
         fig = apply_scientific_style(fig, scientific_style, lx, ly, lxa, lya)
         st.plotly_chart(fig, use_container_width=True, config=dl_config)
         
-        if "LSV" in technique and lsv_cat_list and not is_eis:
+        if "LSV" in technique and lsv_cat_list and not is_eis and not is_cp:
             c1, c2 = st.columns(2)
             with c1:
                 fig_jeta.update_layout(title="Catalytic Performance" if not scientific_style else "", xaxis_title="Overpotential η (mV)", yaxis_title=j_axis_label, height=500)
@@ -1244,6 +1321,6 @@ if uploaded_files:
                 fig_tafel = apply_scientific_style(fig_tafel, scientific_style, lx, ly, lxa, lya)
                 st.plotly_chart(fig_tafel, use_container_width=True, config=dl_config)
         
-        if results_list and not is_eis: st.write("**Recommended Operating Ranges:**"); st.dataframe(pd.DataFrame(results_list), use_container_width=True)
-        if lsv_cat_list and not is_eis: st.write("**🧪 Catalytic Parameters:**"); st.dataframe(pd.DataFrame(lsv_cat_list), use_container_width=True)
+        if results_list and not is_eis and not is_cp: st.write("**Recommended Operating Ranges:**"); st.dataframe(pd.DataFrame(results_list), use_container_width=True)
+        if lsv_cat_list and not is_eis and not is_cp: st.write("**🧪 Catalytic Parameters:**"); st.dataframe(pd.DataFrame(lsv_cat_list), use_container_width=True)
         st.markdown("<br><br>", unsafe_allow_html=True)
