@@ -888,23 +888,20 @@ if uploaded_files:
                     with col_fit:
                         fit_eis_model_toggle = st.toggle("🔋 Perform EIS Fit", value=False, key=f"fit_eis_{sg}")
                     with col_model:
-                        eis_model_selection = st.selectbox(
-                            "Select Equivalent Circuit:", 
-                            [
-                                "Randles: Rs-(CPE||Rct)", 
-                                "Two Time Constants: Rs-(CPE1||R1)-(CPE2||R2)",
-                                "Parallel Adsorption: Rs-(CPE||(Rct||(RL+L)))", 
-                                "Series Adsorption: Rs-(CPE||(Rct+(RL||L)))",
-                                "Adsorption Capacitance: Rs-(CPE1||(Rct+(CPE2||Rads)))",
-                                "Bilayer + Series Adsorption: Rs-(CPE1||R1)-(CPE2||(Rct+(RL||L)))",
-                                "Three Time Constants: Rs-(CPE1||R1)-(CPE2||R2)-(CPE3||R3)"
-                            ], 
-                            key=f"eis_model_sel_{sg}",
-                            disabled=not fit_eis_model_toggle
-                        )
+                        sg_eis_models = {}
+                        if fit_eis_model_toggle:
+                            st.markdown("**Select Equivalent Circuit Model for each Group:**")
+                            cols_models = st.columns(min(3, len(selected_groups)))
+                            for i, g_name in enumerate(selected_groups):
+                                clean_name = g_name.replace("📊 ", "")
+                                sg_eis_models[g_name] = cols_models[i%3].selectbox(
+                                    f"Model for {clean_name}:", 
+                                    EIS_MODELS_LIST, 
+                                    key=f"eis_model_sel_{sg}_{i}"
+                                )
                 else: 
                     fit_eis_model_toggle = False
-                    eis_model_selection = None
+                    sg_eis_models = {}
 
                 st.markdown("**Customize Legend Labels for this Super Group:**")
                 sg_custom_labels = {}
