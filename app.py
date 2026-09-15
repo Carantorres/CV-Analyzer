@@ -28,12 +28,12 @@ Seamlessly process CV, LSV, CP (Galvanostatic), EIS files, and **Chemical Specia
 with st.popover("📖 View Calculation Methods & Algorithms"):
     st.markdown("""
     **1. Physico-Chemical Corrections**
-    *   **iR Drop Compensation:** Corrects for the uncompensated resistance ($R_u$).
+    *   **iR Drop Compensation:** Corrects for the uncompensated resistance ($R_u$) of the electrolyte.
     *   **RHE Scale Conversion:** Shifts the potential to a pH-independent thermodynamic scale.
     *   **Current Density Normalization:** Automatically scales raw current to geometric Current Density (mA/cm²).
 
     **2. ECSA & Capacitance Extraction (CV)**
-    *   **$C_{dl}$ & Roughness Factor (RF):** Reads $\Delta j / 2$ at a user-defined non-faradaic potential across multiple scan rates. Slope gives $C_{dl}$. $RF = C_{dl} / C_{dl,ref}$.
+    *   **$C_{dl}$ & Roughness Factor (RF):** Reads $\Delta j / 2$ at a user-defined non-faradaic potential across multiple scan rates. Regression is forced through the origin ($y = C_{dl} \cdot v$) for physical accuracy. $RF = C_{dl} / C_{dl,ref}$.
     *   **ECSA-Normalized Kinetics:** Automatically corrects peak current densities ($j_{p, ECSA}$) based on calculated RF.
 
     **3. Catalytic Parameter Extraction (LSV)**
@@ -49,7 +49,7 @@ with st.popover("📖 View Calculation Methods & Algorithms"):
     *   **Polarization Sensitivity:** Calculates $R_{ct}$ ratios to evaluate potential-dependent activity.
     
     **6. Chemical Speciation (Medusa)**
-    *   Parses tabular data exported from Medusa software to generate high-quality fractional distribution diagrams.
+    *   Features a custom reverse-engineering algorithm that reads raw `.plt` vector files and maps screen coordinates back to chemical thermodynamic data (Log Conc / Fraction vs pH) to generate high-quality plots.
     """)
 
 st.markdown("---")
@@ -1221,7 +1221,6 @@ if uploaded_files:
                             y_arr = tr["y"]
                             idx_max_E = np.argmax(x_arr)
                             
-                            # C_dl extraction logic
                             try:
                                 x_a, y_a = x_arr[:idx_max_E+1], y_arr[:idx_max_E+1]
                                 x_c, y_c = x_arr[idx_max_E:], y_arr[idx_max_E:]
@@ -1317,7 +1316,6 @@ if uploaded_files:
                         st.markdown(f"#### ⚡ Equivalent Circuit Fit Results")
                         df_eis = pd.DataFrame(sg_eis_params)
                         
-                        # Polarization Sensitivity Ratio
                         if "Rct (Ω)" in df_eis.columns:
                             df_eis["Rct Ratio (Max/Current)"] = df_eis["Rct (Ω)"].max() / df_eis["Rct (Ω)"]
                         elif "R2 (Ω)" in df_eis.columns:
@@ -1354,11 +1352,11 @@ if uploaded_files:
                     if is_sg_lsv:
                         c1, c2 = st.columns(2)
                         with c1:
-                            fig_super_jeta.update_layout(title="", xaxis_title="Overpotential η (mV)", yaxis_title=j_axis_label, height=500)
+                            fig_super_jeta.update_layout(title="Catalytic Performance" if not scientific_style else "", xaxis_title="Overpotential η (mV)", yaxis_title=j_axis_label, height=500)
                             fig_super_jeta = apply_scientific_style(fig_super_jeta, scientific_style, lx, ly, lxa, lya)
                             st.plotly_chart(fig_super_jeta, use_container_width=True, config=dl_config)
                         with c2:
-                            fig_super_tafel.update_layout(title="", xaxis_title="log₁₀|I| (A)", yaxis_title=x_axis_label, xaxis=dict(range=[sg_max_log_I - 4.5, sg_max_log_I + 0.2]), height=500)
+                            fig_super_tafel.update_layout(title="Tafel Plot" if not scientific_style else "", xaxis_title="log₁₀|I| (A)", yaxis_title=x_axis_label, xaxis=dict(range=[sg_max_log_I - 4.5, sg_max_log_I + 0.2]), height=500)
                             fig_super_tafel = apply_scientific_style(fig_super_tafel, scientific_style, lx, ly, lxa, lya)
                             st.plotly_chart(fig_super_tafel, use_container_width=True, config=dl_config)
                             
@@ -1378,15 +1376,23 @@ if uploaded_files:
                         fig_cdl = go.Figure()
                         
                         if len(df_cv_clean) > 1:
-                            slope_cdl, intercept_cdl, r_val_cdl, p_val_cdl, std_err_cdl = linregress(df_cv_clean["v (V/s)"], df_cv_clean["delta_j_half"])
-                            c_dl = slope_cdl
-                            rf = c_dl / c_dl_ref if c_dl_ref > 0 else np.nan
-                            
-                            df_cv["j_p,ECSA (mA/cm²_ECSA)"] = df_cv["j_p (mA/cm²)"] / rf
-                            
-                            fig_cdl.add_trace(go.Scatter(x=df_cv_clean["v (V/s)"], y=df_cv_clean["delta_j_half"], mode='markers', marker=dict(size=10, color='blue'), name="Data"))
-                            fit_v = np.array([0, df_cv_clean["v (V/s)"].max() * 1.1])
-                            fig_cdl.add_trace(go.Scatter(x=fit_v, y=slope_cdl * fit_v + intercept_cdl, mode='lines', line=dict(color='red', dash='dash'), name=f"Fit (C_dl={c_dl:.2f} mF/cm²)"))
+                            # MODIFICACIÓN CLAVE: Ajuste forzado por el origen (0,0) para C_dl
+                            def fit_cdl(v, c): return c * v
+                            try:
+                                popt_cdl, _ = curve_fit(fit_cdl, df_cv_clean["v (V/s)"], df_cv_clean["delta_j_half"])
+                                c_dl = popt_cdl[0]
+                                
+                                ss_res = np.sum((df_cv_clean["delta_j_half"] - c_dl * df_cv_clean["v (V/s)"])**2)
+                                ss_tot = np.sum((df_cv_clean["delta_j_half"] - np.mean(df_cv_clean["delta_j_half"]))**2)
+                                r2_cdl = max(0, 1 - (ss_res / ss_tot)) if ss_tot > 0 else 0
+                                
+                                rf = c_dl / c_dl_ref if c_dl_ref > 0 else np.nan
+                                df_cv["j_p,ECSA (mA/cm²_ECSA)"] = df_cv["j_p (mA/cm²)"] / rf
+                                
+                                fig_cdl.add_trace(go.Scatter(x=df_cv_clean["v (V/s)"], y=df_cv_clean["delta_j_half"], mode='markers', marker=dict(size=10, color='blue'), name="Data"))
+                                fit_v = np.array([0, df_cv_clean["v (V/s)"].max() * 1.1])
+                                fig_cdl.add_trace(go.Scatter(x=fit_v, y=c_dl * fit_v, mode='lines', line=dict(color='red', dash='dash'), name=f"Fit (C_dl={c_dl:.2f} mF/cm²)"))
+                            except: pass
                             
                             fig_cdl.update_layout(xaxis_title="Scan Rate v (V/s)", yaxis_title="Δj/2 (mA/cm²)", height=450)
                             fig_cdl = apply_scientific_style(fig_cdl, scientific_style, lx, ly, lxa, lya)
@@ -1407,9 +1413,9 @@ if uploaded_files:
                             st.metric("b-value (Slope ± SE)", f"{slope:.4f} ± {std_err:.4f}", f"R² = {r_value**2:.4f}", delta_color="off")
                             st.info("💡 **b = 0.5**: Diffusion-controlled. **b = 1.0**: Surface-controlled.")
                         with c2: 
-                            if len(df_cv_clean) > 1:
+                            if len(df_cv_clean) > 1 and not np.isnan(c_dl):
                                 st.plotly_chart(fig_cdl, use_container_width=True, config=dl_config)
-                                st.metric("Double Layer Capacitance (C_dl)", f"{c_dl:.3f} mF/cm²", f"R² = {r_val_cdl**2:.4f} (at {e_non_faradaic} V)", delta_color="off")
+                                st.metric("Double Layer Capacitance (C_dl)", f"{c_dl:.3f} mF/cm²", f"R² = {r2_cdl:.4f} (at {e_non_faradaic} V)", delta_color="off")
                                 st.metric("Roughness Factor (RF)", f"{rf:.1f}", f"Ref = {c_dl_ref} mF/cm²", delta_color="off")
 
                         cols_to_show = ["Curve", "v (mV/s)", "E_p (V)", "j_p (mA/cm²)"]
