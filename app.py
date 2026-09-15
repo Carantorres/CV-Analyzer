@@ -28,23 +28,28 @@ Seamlessly process CV, LSV, CP (Galvanostatic), EIS files, and **Chemical Specia
 with st.popover("📖 View Calculation Methods & Algorithms"):
     st.markdown("""
     **1. Physico-Chemical Corrections**
-    *   **iR Drop Compensation:** Corrects for the uncompensated resistance ($R_u$) of the electrolyte.
+    *   **iR Drop Compensation:** Corrects for the uncompensated resistance ($R_u$).
     *   **RHE Scale Conversion:** Shifts the potential to a pH-independent thermodynamic scale.
     *   **Current Density Normalization:** Automatically scales raw current to geometric Current Density (mA/cm²).
 
-    **2. Catalytic Parameter Extraction (LSV)**
+    **2. ECSA & Capacitance Extraction (CV)**
+    *   **$C_{dl}$ & Roughness Factor (RF):** Reads $\Delta j / 2$ at a user-defined non-faradaic potential across multiple scan rates. Slope gives $C_{dl}$. $RF = C_{dl} / C_{dl,ref}$.
+    *   **ECSA-Normalized Kinetics:** Automatically corrects peak current densities ($j_{p, ECSA}$) based on calculated RF.
+
+    **3. Catalytic Parameter Extraction (LSV)**
     *   **Onset Potential ($E_{onset}$):** Point where $|I|$ reaches 5% of the absolute maximum current.
     *   **Robust Tafel Slope:** Computed using a dynamic Sliding Window algorithm, maximizing $R^2$.
 
-    **3. Averaging & Statistical Analysis**
-    *   **Cycle Averaging:** Individual scans are mapped and interpolated over a normalized coordinate system to produce unified trendlines.
-
-    **4. Electrochemical Impedance Spectroscopy (EIS)**
-    *   **Equivalent Circuit Fitting:** Applies Non-Linear Least Squares (CNLS) with **Modulus Weighting** ($\\sigma = |Z|$) to ensure accurate fitting across all impedance magnitudes. Generates a high-density synthetic curve for continuous publication-ready lines. 
-    *   **Frequency Cropping:** Allows discarding non-stationary low/high frequency data (e.g., gas bubble noise) that violates Kramers-Kronig validity before fitting.
+    **4. Scan Rate Kinetics ($b$-value)**
+    *   A linear regression of $\\log_{10}(j_{pa})$ vs $\\log_{10}(v)$ calculates the slope $b$.
     
-    **5. Chemical Speciation (Medusa)**
-    *   Features a custom reverse-engineering algorithm that reads raw `.plt` vector files and maps screen coordinates back to chemical thermodynamic data (Log Conc / Fraction vs pH) to generate high-quality plots.
+    **5. Electrochemical Impedance Spectroscopy (EIS)**
+    *   **Equivalent Circuit Fitting:** Applies Non-Linear Least Squares (CNLS) with **Modulus Weighting** ($\\sigma = |Z|$). Generates high-density synthetic curves.
+    *   **Effective Capacitance ($C_{eff}$):** Converts CPE to true capacitance using $C_{eff} = Q^{1/n} \cdot R^{(1-n)/n}$.
+    *   **Polarization Sensitivity:** Calculates $R_{ct}$ ratios to evaluate potential-dependent activity.
+    
+    **6. Chemical Speciation (Medusa)**
+    *   Parses tabular data exported from Medusa software to generate high-quality fractional distribution diagrams.
     """)
 
 st.markdown("---")
@@ -91,6 +96,12 @@ with st.sidebar:
     electrode_area = st.number_input("Electrode Area (cm²)", min_value=0.00001, value=1.00000, step=0.001, format="%.5f")
     manual_scan_rate = st.number_input("Manual Scan Rate (mV/s) [Optional]", value=0.0, step=10.0)
     e_rev = st.number_input("Thermodynamic Potential (E_rev)", value=0.000, step=0.01)
+
+    st.markdown("---")
+    st.header("📏 ECSA & C_dl Parameters")
+    c_dl_ref = st.number_input("Reference C_dl (mF/cm²)", min_value=0.001, value=0.040, step=0.001, format="%.3f")
+    e_non_faradaic = st.number_input("Non-Faradaic E (V) for C_dl", value=0.25, step=0.05)
+    manual_rf = st.number_input("Calculated RF for EIS (Optional)", value=1.0, step=0.1, help="If known from CV, enter here to compute Rct·A/RF in EIS.")
 
     st.markdown("---")
     st.header("🔋 Peak Search (Kinetics)")
@@ -217,7 +228,7 @@ EIS_MODELS_LIST = [
     "Three Time Constants: Rs-(CPE1||R1)-(CPE2||R2)-(CPE3||R3) [Bilayer NiOOH]"
 ]
 
-def fit_uor_eis(f, zr, zi, model_type):
+def fit_uor_eis(f, zr, zi, model_type, area_cm2, rf_val):
     y_data = np.hstack([zr, zi])
     Z_data = zr - 1j * zi
     abs_Z = np.abs(Z_data)
@@ -352,6 +363,28 @@ def fit_uor_eis(f, zr, zi, model_type):
             results[name] = popt[i]
         results["R²"] = R2
         results["χ²"] = chi2
+        
+        # Calculate Effective Capacitance
+        def calc_ceff(Q, n, R):
+            if R <= 0 or Q <= 0 or n <= 0: return np.nan
+            return (Q**(1/n)) * (R**((1-n)/n))
+
+        if "CPE-T" in results and "Rct (Ω)" in results:
+            results["C_eff (F)"] = calc_ceff(results["CPE-T"], results["CPE-P"], results["Rct (Ω)"])
+        if "CPE1-T" in results and "R1 (Ω)" in results:
+            results["C_eff1 (F)"] = calc_ceff(results["CPE1-T"], results["CPE1-P"], results["R1 (Ω)"])
+        if "CPE2-T" in results:
+            r_tgt = results.get("R2 (Ω)", results.get("Rct (Ω)", None))
+            if r_tgt is not None:
+                results["C_eff2 (F)"] = calc_ceff(results["CPE2-T"], results["CPE2-P"], r_tgt)
+        if "CPE3-T" in results and "R3 (Ω)" in results:
+            results["C_eff3 (F)"] = calc_ceff(results["CPE3-T"], results["CPE3-P"], results["R3 (Ω)"])
+            
+        rct_val = results.get("Rct (Ω)", results.get("R2 (Ω)", None))
+        if rct_val is not None:
+            results["Rct·A (Ω·cm²)"] = rct_val * area_cm2
+            if rf_val > 0:
+                results["Rct·A/RF (Ω·cm²_ECSA)"] = (rct_val * area_cm2) / rf_val
             
         return results, f_sim, Z_sim_real, Z_sim_imag
     except Exception as e:
@@ -1165,7 +1198,7 @@ if uploaded_files:
                             
                             if fit_eis_model_toggle:
                                 selected_model = sg_eis_models[tr["group"]]
-                                results_dict, f_sim, zr_sim, zi_sim = fit_uor_eis(f_hz, zr, zi, selected_model)
+                                results_dict, f_sim, zr_sim, zi_sim = fit_uor_eis(f_hz, zr, zi, selected_model, electrode_area, manual_rf)
                                 if results_dict is not None:
                                     results_dict["Curve"] = tr["name"]
                                     results_dict["Model"] = selected_model.split(" [")[0] 
@@ -1184,41 +1217,67 @@ if uploaded_files:
                             fig_super.add_trace(go.Scatter(x=tr["x"], y=tr["y"], mode='lines', name=tr["name"], line=dict(color=c_color, width=2.5)))
                             if tr["y"].min() < -1.0: y_axis_label_medusa = "Log Concentration"
                         else:
-                            if not is_sg_lsv and tr.get("sr") and tr["sr"] > 0:
-                                x_anodic = tr["x"][:np.argmax(tr["x"])+1] if np.argmax(tr["x"]) > 0 else tr["x"]
-                                y_anodic = tr["y"][:np.argmax(tr["x"])+1] if np.argmax(tr["x"]) > 0 else tr["y"]
-                                
-                                if limit_peak_search and peak_min_v is not None and peak_max_v is not None:
-                                    mask = (x_anodic >= peak_min_v) & (x_anodic <= peak_max_v)
-                                    if np.any(mask):
-                                        peaks, _ = find_peaks(y_anodic[mask])
-                                        if len(peaks) > 0:
-                                            b_idx = peaks[np.argmax(y_anodic[mask][peaks])]
-                                            i_pa, E_pa = y_anodic[mask][b_idx], x_anodic[mask][b_idx]
-                                        else:
-                                            max_idx = np.argmax(y_anodic[mask])
-                                            i_pa, E_pa = y_anodic[mask][max_idx], x_anodic[mask][max_idx]
-                                    else:
-                                        max_idx = np.argmax(y_anodic)
-                                        i_pa, E_pa = y_anodic[max_idx], x_anodic[max_idx]
-                                else:
-                                    peaks, _ = find_peaks(y_anodic)
-                                    if len(peaks) > 0:
-                                        b_idx = peaks[np.argmax(y_anodic[peaks])]
-                                        i_pa, E_pa = y_anodic[b_idx], x_anodic[b_idx]
-                                    else:
-                                        max_idx = np.argmax(y_anodic)
-                                        i_pa, E_pa = y_anodic[max_idx], x_anodic[max_idx]
-                                    
-                                j_pa = (i_pa * 1000) / electrode_area
-                                if j_pa > 0: sg_cv_kinetics.append({"Curve": tr["name"], "v (mV/s)": tr["sr"], "log_v": np.log10(tr["sr"]), "E_p (V)": E_pa, "j_p (mA/cm²)": j_pa, "log_jp": np.log10(j_pa)})
+                            x_arr = tr["x"]
+                            y_arr = tr["y"]
+                            idx_max_E = np.argmax(x_arr)
                             
-                            j_y = tr["y"] * 1000 / electrode_area
+                            # C_dl extraction logic
+                            try:
+                                x_a, y_a = x_arr[:idx_max_E+1], y_arr[:idx_max_E+1]
+                                x_c, y_c = x_arr[idx_max_E:], y_arr[idx_max_E:]
+                                sort_a = np.argsort(x_a)
+                                sort_c = np.argsort(x_c)
+                                
+                                if e_non_faradaic >= np.min(x_arr) and e_non_faradaic <= np.max(x_arr):
+                                    i_a_val = np.interp(e_non_faradaic, x_a[sort_a], y_a[sort_a])
+                                    i_c_val = np.interp(e_non_faradaic, x_c[sort_c], y_c[sort_c])
+                                    j_a_val = i_a_val * 1000 / electrode_area
+                                    j_c_val = i_c_val * 1000 / electrode_area
+                                    delta_j_half = (j_a_val - j_c_val) / 2.0
+                                else:
+                                    delta_j_half = np.nan
+                            except:
+                                delta_j_half = np.nan
+
+                            x_anodic = x_arr[:idx_max_E+1] if idx_max_E > 0 else x_arr
+                            y_anodic = y_arr[:idx_max_E+1] if idx_max_E > 0 else y_arr
+                            
+                            if limit_peak_search and peak_min_v is not None and peak_max_v is not None:
+                                mask = (x_anodic >= peak_min_v) & (x_anodic <= peak_max_v)
+                                if np.any(mask):
+                                    peaks, _ = find_peaks(y_anodic[mask])
+                                    if len(peaks) > 0:
+                                        b_idx = peaks[np.argmax(y_anodic[mask][peaks])]
+                                        i_pa, E_pa = y_anodic[mask][b_idx], x_anodic[mask][b_idx]
+                                    else:
+                                        max_idx = np.argmax(y_anodic[mask])
+                                        i_pa, E_pa = y_anodic[mask][max_idx], x_anodic[mask][max_idx]
+                                else:
+                                    max_idx = np.argmax(y_anodic)
+                                    i_pa, E_pa = y_anodic[max_idx], x_anodic[max_idx]
+                            else:
+                                peaks, _ = find_peaks(y_anodic)
+                                if len(peaks) > 0:
+                                    b_idx = peaks[np.argmax(y_anodic[peaks])]
+                                    i_pa, E_pa = y_anodic[b_idx], x_anodic[b_idx]
+                                else:
+                                    max_idx = np.argmax(y_anodic)
+                                    i_pa, E_pa = y_anodic[max_idx], x_anodic[max_idx]
+                                
+                            j_pa = (i_pa * 1000) / electrode_area
+                            if j_pa > 0 and tr.get("sr") and tr["sr"] > 0 and not is_sg_lsv: 
+                                sg_cv_kinetics.append({
+                                    "Curve": tr["name"], "v (mV/s)": tr["sr"], "log_v": np.log10(tr["sr"]), 
+                                    "E_p (V)": E_pa, "j_p (mA/cm²)": j_pa, "log_jp": np.log10(j_pa),
+                                    "delta_j_half": delta_j_half
+                                })
+                            
+                            j_y = y_arr * 1000 / electrode_area
                             if tr.get("std") is not None and show_sd_shadow:
                                 j_std = tr["std"] * 1000 / electrode_area
-                                fig_super.add_trace(go.Scatter(x=tr["x"], y=j_y+j_std, mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
-                                fig_super.add_trace(go.Scatter(x=tr["x"], y=j_y-j_std, mode='lines', line=dict(width=0), fill='tonexty', fillcolor=to_rgba(c_color, 0.2), showlegend=False, hoverinfo='skip'))
-                            fig_super.add_trace(go.Scatter(x=tr["x"], y=j_y, mode='lines', name=tr["name"], line=dict(color=c_color, width=2.5)))
+                                fig_super.add_trace(go.Scatter(x=x_arr, y=j_y+j_std, mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
+                                fig_super.add_trace(go.Scatter(x=x_arr, y=j_y-j_std, mode='lines', line=dict(width=0), fill='tonexty', fillcolor=to_rgba(c_color, 0.2), showlegend=False, hoverinfo='skip'))
+                            fig_super.add_trace(go.Scatter(x=x_arr, y=j_y, mode='lines', name=tr["name"], line=dict(color=c_color, width=2.5)))
                             
                             if "LSV" in tr["tech"]:
                                 cat_params, fit_data = extract_lsv_catalytic_parameters(tr["df"], electrode_area, e_rev)
@@ -1257,7 +1316,14 @@ if uploaded_files:
                     if fit_eis_model_toggle and sg_eis_params:
                         st.markdown(f"#### ⚡ Equivalent Circuit Fit Results")
                         df_eis = pd.DataFrame(sg_eis_params)
-                        all_possible_cols = ["Curve", "Model", "Rs (Ω)", "CPE-T", "CPE-P", "Rct (Ω)", "W (Ω·s^-0.5)", "RL (Ω)", "L (H)", "Ls (H)", "CPE1-T", "CPE1-P", "R1 (Ω)", "CPE2-T", "CPE2-P", "R2 (Ω)", "CPE3-T", "CPE3-P", "R3 (Ω)", "Rads (Ω)", "R²", "χ²"]
+                        
+                        # Polarization Sensitivity Ratio
+                        if "Rct (Ω)" in df_eis.columns:
+                            df_eis["Rct Ratio (Max/Current)"] = df_eis["Rct (Ω)"].max() / df_eis["Rct (Ω)"]
+                        elif "R2 (Ω)" in df_eis.columns:
+                            df_eis["Rct Ratio (Max/Current)"] = df_eis["R2 (Ω)"].max() / df_eis["R2 (Ω)"]
+                            
+                        all_possible_cols = ["Curve", "Model", "Rs (Ω)", "CPE-T", "CPE-P", "Rct (Ω)", "W (Ω·s^-0.5)", "RL (Ω)", "L (H)", "Ls (H)", "CPE1-T", "CPE1-P", "R1 (Ω)", "CPE2-T", "CPE2-P", "R2 (Ω)", "CPE3-T", "CPE3-P", "R3 (Ω)", "Rads (Ω)", "Rct·A (Ω·cm²)", "Rct·A/RF (Ω·cm²_ECSA)", "C_eff (F)", "C_eff1 (F)", "C_eff2 (F)", "C_eff3 (F)", "Rct Ratio (Max/Current)", "R²", "χ²"]
                         cols = [c for c in all_possible_cols if c in df_eis.columns]
                         df_eis = df_eis[cols]
                         
@@ -1267,7 +1333,9 @@ if uploaded_files:
                             "CPE1-T": "{:.2e}", "CPE1-P": "{:.3f}", "R1 (Ω)": "{:.2f}", 
                             "CPE2-T": "{:.2e}", "CPE2-P": "{:.3f}", "R2 (Ω)": "{:.2f}", 
                             "CPE3-T": "{:.2e}", "CPE3-P": "{:.3f}", "R3 (Ω)": "{:.2f}", 
-                            "Rads (Ω)": "{:.2f}", "R²": "{:.4f}", "χ²": "{:.2e}"
+                            "Rads (Ω)": "{:.2f}", "Rct·A (Ω·cm²)": "{:.2f}", "Rct·A/RF (Ω·cm²_ECSA)": "{:.2f}", 
+                            "C_eff (F)": "{:.2e}", "C_eff1 (F)": "{:.2e}", "C_eff2 (F)": "{:.2e}", "C_eff3 (F)": "{:.2e}", 
+                            "Rct Ratio (Max/Current)": "{:.2f}", "R²": "{:.4f}", "χ²": "{:.2e}"
                         }
                         st.dataframe(df_eis.style.format({k:v for k,v in format_dict.items() if k in df_eis.columns}), use_container_width=True)
                 elif is_sg_cp:
@@ -1286,11 +1354,11 @@ if uploaded_files:
                     if is_sg_lsv:
                         c1, c2 = st.columns(2)
                         with c1:
-                            fig_super_jeta.update_layout(title="Catalytic Performance" if not scientific_style else "", xaxis_title="Overpotential η (mV)", yaxis_title=j_axis_label, height=500)
+                            fig_super_jeta.update_layout(title="", xaxis_title="Overpotential η (mV)", yaxis_title=j_axis_label, height=500)
                             fig_super_jeta = apply_scientific_style(fig_super_jeta, scientific_style, lx, ly, lxa, lya)
                             st.plotly_chart(fig_super_jeta, use_container_width=True, config=dl_config)
                         with c2:
-                            fig_super_tafel.update_layout(title="Tafel Plot" if not scientific_style else "", xaxis_title="log₁₀|I| (A)", yaxis_title=x_axis_label, xaxis=dict(range=[sg_max_log_I - 4.5, sg_max_log_I + 0.2]), height=500)
+                            fig_super_tafel.update_layout(title="", xaxis_title="log₁₀|I| (A)", yaxis_title=x_axis_label, xaxis=dict(range=[sg_max_log_I - 4.5, sg_max_log_I + 0.2]), height=500)
                             fig_super_tafel = apply_scientific_style(fig_super_tafel, scientific_style, lx, ly, lxa, lya)
                             st.plotly_chart(fig_super_tafel, use_container_width=True, config=dl_config)
                             
@@ -1299,8 +1367,30 @@ if uploaded_files:
                             st.dataframe(pd.DataFrame(sg_lsv_params), use_container_width=True)
                             
                     elif len(sg_cv_kinetics) > 1:
-                        st.markdown("#### 🔋 CV Kinetics ($b$-value Determination)")
+                        st.markdown("#### 🔋 CV Kinetics & ECSA ($C_{dl}$ y $b$-value)")
                         df_cv = pd.DataFrame(sg_cv_kinetics).sort_values("v (mV/s)")
+                        
+                        df_cv["v (V/s)"] = df_cv["v (mV/s)"] / 1000.0
+                        df_cv_clean = df_cv.dropna(subset=["delta_j_half", "v (V/s)"])
+                        
+                        c_dl = np.nan
+                        rf = np.nan
+                        fig_cdl = go.Figure()
+                        
+                        if len(df_cv_clean) > 1:
+                            slope_cdl, intercept_cdl, r_val_cdl, p_val_cdl, std_err_cdl = linregress(df_cv_clean["v (V/s)"], df_cv_clean["delta_j_half"])
+                            c_dl = slope_cdl
+                            rf = c_dl / c_dl_ref if c_dl_ref > 0 else np.nan
+                            
+                            df_cv["j_p,ECSA (mA/cm²_ECSA)"] = df_cv["j_p (mA/cm²)"] / rf
+                            
+                            fig_cdl.add_trace(go.Scatter(x=df_cv_clean["v (V/s)"], y=df_cv_clean["delta_j_half"], mode='markers', marker=dict(size=10, color='blue'), name="Data"))
+                            fit_v = np.array([0, df_cv_clean["v (V/s)"].max() * 1.1])
+                            fig_cdl.add_trace(go.Scatter(x=fit_v, y=slope_cdl * fit_v + intercept_cdl, mode='lines', line=dict(color='red', dash='dash'), name=f"Fit (C_dl={c_dl:.2f} mF/cm²)"))
+                            
+                            fig_cdl.update_layout(xaxis_title="Scan Rate v (V/s)", yaxis_title="Δj/2 (mA/cm²)", height=450)
+                            fig_cdl = apply_scientific_style(fig_cdl, scientific_style, lx, ly, lxa, lya)
+                        
                         slope, intercept, r_value, p_value, std_err = linregress(df_cv["log_v"], df_cv["log_jp"])
                         
                         fig_b = go.Figure()
@@ -1312,11 +1402,19 @@ if uploaded_files:
                         fig_b = apply_scientific_style(fig_b, scientific_style, lx, ly, lxa, lya)
                         
                         c1, c2 = st.columns([1, 1])
-                        with c1: st.plotly_chart(fig_b, use_container_width=True, config=dl_config)
-                        with c2:
+                        with c1: 
+                            st.plotly_chart(fig_b, use_container_width=True, config=dl_config)
                             st.metric("b-value (Slope ± SE)", f"{slope:.4f} ± {std_err:.4f}", f"R² = {r_value**2:.4f}", delta_color="off")
-                            st.info("💡 **b = 0.5**: Diffusion-controlled process. **b = 1.0**: Surface-controlled (capacitive) process.")
-                            st.dataframe(df_cv[["Curve", "v (mV/s)", "E_p (V)", "j_p (mA/cm²)"]].style.format({"v (mV/s)": "{:.1f}", "E_p (V)": "{:.3f}", "j_p (mA/cm²)": "{:.4f}"}), use_container_width=True)
+                            st.info("💡 **b = 0.5**: Diffusion-controlled. **b = 1.0**: Surface-controlled.")
+                        with c2: 
+                            if len(df_cv_clean) > 1:
+                                st.plotly_chart(fig_cdl, use_container_width=True, config=dl_config)
+                                st.metric("Double Layer Capacitance (C_dl)", f"{c_dl:.3f} mF/cm²", f"R² = {r_val_cdl**2:.4f} (at {e_non_faradaic} V)", delta_color="off")
+                                st.metric("Roughness Factor (RF)", f"{rf:.1f}", f"Ref = {c_dl_ref} mF/cm²", delta_color="off")
+
+                        cols_to_show = ["Curve", "v (mV/s)", "E_p (V)", "j_p (mA/cm²)"]
+                        if not np.isnan(rf): cols_to_show.append("j_p,ECSA (mA/cm²_ECSA)")
+                        st.dataframe(df_cv[cols_to_show].style.format({c: "{:.3f}" for c in cols_to_show if c != "Curve"}), use_container_width=True)
 
     # --- BOTTOM AREA: INDIVIDUAL ANALYSIS ---
     st.markdown("---")
