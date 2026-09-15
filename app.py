@@ -30,6 +30,7 @@ with st.popover("📖 View Calculation Methods & Algorithms"):
     **1. Physico-Chemical Corrections**
     *   **iR Drop Compensation:** Corrects for the uncompensated resistance ($R_u$) of the electrolyte.
     *   **RHE Scale Conversion:** Shifts the potential to a pH-independent thermodynamic scale.
+    *   **Current Density Normalization:** Automatically scales raw current to geometric Current Density (mA/cm²).
 
     **2. Catalytic Parameter Extraction (LSV)**
     *   **Onset Potential ($E_{onset}$):** Point where $|I|$ reaches 5% of the absolute maximum current.
@@ -133,7 +134,7 @@ with st.sidebar:
 
 # Define dynamic labels globally after variables are loaded
 i_axis_label = "Current, I (A)" if scientific_style else "I (A)"
-j_axis_label = "Current Density, j (mA cm⁻²)" if scientific_style else "Current Density j (mA/cm²)"
+j_axis_label = "I/mA·cm⁻²" if scientific_style else "Current Density j (mA/cm²)"
 
 publication_palette = ['#000000', '#E41A1C', '#377EB8', '#4DAF4A', '#984EA3', '#FF7F00', '#A65628', '#F781BF'] + px.colors.qualitative.Alphabet
 combined_palette = publication_palette
@@ -174,19 +175,23 @@ def get_averaged_curve(processed_curves: List[Tuple[str, pd.DataFrame]]) -> Tupl
     if not processed_curves: return None, None, None
     max_points = max(len(dd) for _, dd in processed_curves)
     common_idx = np.linspace(0, 1, max_points)
+    
     E_interp, I_interp = [], []
     for _, dd in processed_curves:
         idx = np.linspace(0, 1, len(dd))
         E_interp.append(np.interp(common_idx, idx, dd["x"].values))
         I_interp.append(np.interp(common_idx, idx, dd["y"].values))
+        
     return np.mean(E_interp, axis=0), np.mean(I_interp, axis=0), np.std(I_interp, axis=0)
 
 def get_averaged_eis_curve(processed_curves: List[Tuple[str, pd.DataFrame]]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     if not processed_curves: return None, None, None, None, None
+    
     all_f = np.concatenate([dd["f"].values for _, dd in processed_curves])
     min_f, max_f = np.min(all_f), np.max(all_f)
     max_points = max(len(dd) for _, dd in processed_curves)
     common_f = np.logspace(np.log10(max_f), np.log10(min_f), max_points)
+    
     Zr_interp, Zi_interp = [], []
     for _, dd in processed_curves:
         f_vals = dd["f"].values
@@ -194,8 +199,10 @@ def get_averaged_eis_curve(processed_curves: List[Tuple[str, pd.DataFrame]]) -> 
         f_sorted = f_vals[sort_idx]
         zr_sorted = dd["x"].values[sort_idx]
         zi_sorted = dd["y"].values[sort_idx]
+        
         Zr_interp.append(np.interp(common_f, f_sorted, zr_sorted))
         Zi_interp.append(np.interp(common_f, f_sorted, zi_sorted))
+        
     return common_f[::-1], np.mean(Zr_interp, axis=0)[::-1], np.mean(Zi_interp, axis=0)[::-1], np.std(Zr_interp, axis=0)[::-1], np.std(Zi_interp, axis=0)[::-1]
 
 # --- EIS FITTING MODEL ---
@@ -214,7 +221,7 @@ def fit_uor_eis(f, zr, zi, model_type):
     y_data = np.hstack([zr, zi])
     Z_data = zr - 1j * zi
     abs_Z = np.abs(Z_data)
-    sigma = np.hstack([abs_Z, abs_Z])
+    sigma = np.hstack([abs_Z, abs_Z]) 
     
     Rs_fixed = np.min(zr)
     R_tot = np.abs(np.max(zr) - Rs_fixed)
@@ -1206,10 +1213,12 @@ if uploaded_files:
                                 j_pa = (i_pa * 1000) / electrode_area
                                 if j_pa > 0: sg_cv_kinetics.append({"Curve": tr["name"], "v (mV/s)": tr["sr"], "log_v": np.log10(tr["sr"]), "E_p (V)": E_pa, "j_p (mA/cm²)": j_pa, "log_jp": np.log10(j_pa)})
                             
+                            j_y = tr["y"] * 1000 / electrode_area
                             if tr.get("std") is not None and show_sd_shadow:
-                                fig_super.add_trace(go.Scatter(x=tr["x"], y=tr["y"]+tr["std"], mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
-                                fig_super.add_trace(go.Scatter(x=tr["x"], y=tr["y"]-tr["std"], mode='lines', line=dict(width=0), fill='tonexty', fillcolor=to_rgba(c_color, 0.2), showlegend=False, hoverinfo='skip'))
-                            fig_super.add_trace(go.Scatter(x=tr["x"], y=tr["y"], mode='lines', name=tr["name"], line=dict(color=c_color, width=2.5)))
+                                j_std = tr["std"] * 1000 / electrode_area
+                                fig_super.add_trace(go.Scatter(x=tr["x"], y=j_y+j_std, mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
+                                fig_super.add_trace(go.Scatter(x=tr["x"], y=j_y-j_std, mode='lines', line=dict(width=0), fill='tonexty', fillcolor=to_rgba(c_color, 0.2), showlegend=False, hoverinfo='skip'))
+                            fig_super.add_trace(go.Scatter(x=tr["x"], y=j_y, mode='lines', name=tr["name"], line=dict(color=c_color, width=2.5)))
                             
                             if "LSV" in tr["tech"]:
                                 cat_params, fit_data = extract_lsv_catalytic_parameters(tr["df"], electrode_area, e_rev)
@@ -1270,18 +1279,18 @@ if uploaded_files:
                     fig_super = apply_scientific_style(fig_super, scientific_style, lx, ly, lxa, lya)
                     st.plotly_chart(fig_super, use_container_width=True, config=dl_config)
                 else:
-                    fig_super.update_layout(title="", xaxis_title=x_axis_label, yaxis_title=i_axis_label, height=500)
+                    fig_super.update_layout(title="", xaxis_title=x_axis_label, yaxis_title=j_axis_label, height=500)
                     fig_super = apply_scientific_style(fig_super, scientific_style, lx, ly, lxa, lya)
                     st.plotly_chart(fig_super, use_container_width=True, config=dl_config)
                     
                     if is_sg_lsv:
                         c1, c2 = st.columns(2)
                         with c1:
-                            fig_super_jeta.update_layout(title="", xaxis_title="Overpotential η (mV)", yaxis_title=j_axis_label, height=500)
+                            fig_super_jeta.update_layout(title="Catalytic Performance" if not scientific_style else "", xaxis_title="Overpotential η (mV)", yaxis_title=j_axis_label, height=500)
                             fig_super_jeta = apply_scientific_style(fig_super_jeta, scientific_style, lx, ly, lxa, lya)
                             st.plotly_chart(fig_super_jeta, use_container_width=True, config=dl_config)
                         with c2:
-                            fig_super_tafel.update_layout(title="", xaxis_title="log₁₀|I| (A)", yaxis_title=x_axis_label, xaxis=dict(range=[sg_max_log_I - 4.5, sg_max_log_I + 0.2]), height=500)
+                            fig_super_tafel.update_layout(title="Tafel Plot" if not scientific_style else "", xaxis_title="log₁₀|I| (A)", yaxis_title=x_axis_label, xaxis=dict(range=[sg_max_log_I - 4.5, sg_max_log_I + 0.2]), height=500)
                             fig_super_tafel = apply_scientific_style(fig_super_tafel, scientific_style, lx, ly, lxa, lya)
                             st.plotly_chart(fig_super_tafel, use_container_width=True, config=dl_config)
                             
@@ -1418,10 +1427,13 @@ if uploaded_files:
                 E_mean, I_mean, I_std = get_averaged_curve(processed_curves)
                 mean_color = combined_palette[0]
                 
+                j_mean = I_mean * 1000 / electrode_area
+                j_std = I_std * 1000 / electrode_area
+                
                 if show_sd_shadow:
-                    fig.add_trace(go.Scatter(x=E_mean, y=I_mean + I_std, mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
-                    fig.add_trace(go.Scatter(x=E_mean, y=I_mean - I_std, mode='lines', line=dict(width=0), fill='tonexty', fillcolor=to_rgba(mean_color, 0.2), showlegend=False, hoverinfo='skip'))
-                fig.add_trace(go.Scatter(x=E_mean, y=I_mean, mode='lines', name='Average', line=dict(color=mean_color, width=2.5)))
+                    fig.add_trace(go.Scatter(x=E_mean, y=j_mean + j_std, mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
+                    fig.add_trace(go.Scatter(x=E_mean, y=j_mean - j_std, mode='lines', line=dict(width=0), fill='tonexty', fillcolor=to_rgba(mean_color, 0.2), showlegend=False, hoverinfo='skip'))
+                fig.add_trace(go.Scatter(x=E_mean, y=j_mean, mode='lines', name='Average', line=dict(color=mean_color, width=2.5)))
                 
                 df_mean = pd.DataFrame({"x": E_mean, "y": I_mean})
                 out = recommend_operating_ranges_for_curve(df_mean)
@@ -1456,7 +1468,9 @@ if uploaded_files:
                 elif is_medusa:
                     fig.add_trace(go.Scatter(x=dd["x"], y=dd["y"], mode='lines', name=cid, line=dict(color=line_color, width=2.5)))
                 else:
-                    fig.add_trace(go.Scatter(x=dd["x"], y=dd["y"], mode='lines', name=cid, line=dict(color=line_color, width=2)))
+                    j_y = dd["y"] * 1000 / electrode_area
+                    fig.add_trace(go.Scatter(x=dd["x"], y=j_y, mode='lines', name=cid, line=dict(color=line_color, width=2)))
+                    
                     out = recommend_operating_ranges_for_curve(dd)
                     ns, ro = out["recommended_noise_safe_V"], out["recommended_reduction_only_V"]
                     results_list.append({"Curve": cid, "Points": out["N_points"], "Noise-Safe Min (V)": round(ns[0], 4) if ns else None, "Noise-Safe Max (V)": round(ns[1], 4) if ns else None, "Reduction Min (V)": round(ro[0], 4) if ro else None, "Reduction Max (V)": round(ro[1], 4) if ro else None})
@@ -1486,7 +1500,7 @@ if uploaded_files:
             y_title = y_axis_label_medusa_ind
         else:
             x_title = x_axis_label
-            y_title = i_axis_label
+            y_title = j_axis_label
             
         title_txt = "Nyquist Plot" if is_eis else "Galvanostatic Charge-Discharge" if is_cp else "Chemical Speciation" if is_medusa else "Raw Data" if not scientific_style else ""
         fig.update_layout(title=title_txt, xaxis_title=x_title, yaxis_title=y_title, height=500)
