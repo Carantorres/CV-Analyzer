@@ -124,6 +124,20 @@ with st.sidebar:
         eis_min_f, eis_max_f = 1e-9, 1e9
 
     st.markdown("---")
+    st.header("✂️ Medusa Axis Cropping")
+    crop_medusa = st.toggle("Limit X/Y Axes (Medusa Only)", value=False, help="Crop the pH and Log Concentration/Fraction axes.")
+    if crop_medusa:
+        c_mx, c_my = st.columns(2)
+        with c_mx: 
+            medusa_xmin = st.number_input("Min X (pH)", value=4.0, step=0.5)
+            medusa_xmax = st.number_input("Max X (pH)", value=5.0, step=0.5)
+        with c_my: 
+            medusa_ymin = st.number_input("Min Y", value=-4.0, step=0.5)
+            medusa_ymax = st.number_input("Max Y", value=-1.0, step=0.5)
+    else:
+        medusa_xmin, medusa_xmax, medusa_ymin, medusa_ymax = None, None, None, None
+
+    st.markdown("---")
     st.header("🎨 Plot Formatting")
     scientific_style = st.toggle("Scientific Paper Style (ACS/Elsevier)", value=True)
     show_sd_shadow = st.toggle("Show SD Shadow on Averages", value=True)
@@ -556,12 +570,31 @@ def apply_scientific_style(fig, is_scientific, lx, ly, lxa, lya):
     if is_scientific:
         fig.update_layout(
             title="", plot_bgcolor='white', paper_bgcolor='white',
-            font=dict(family="Arial, sans-serif", size=16, color="black"),
+            font=dict(family="Arial, sans-serif", size=20, color="black"),
             margin=dict(l=80, r=40, t=40, b=60)
         )
-        fig.update_xaxes(showgrid=False, showline=True, linecolor='black', linewidth=2, mirror="all", ticks='inside', tickcolor='black', tickwidth=2, ticklen=8, title_font=dict(size=18, family="Arial, sans-serif", color="black"), tickfont=dict(size=15, family="Arial, sans-serif", color="black"), zeroline=False)
-        fig.update_yaxes(showgrid=False, showline=True, linecolor='black', linewidth=2, mirror="all", ticks='inside', tickcolor='black', tickwidth=2, ticklen=8, title_font=dict(size=18, family="Arial, sans-serif", color="black"), tickfont=dict(size=15, family="Arial, sans-serif", color="black"), zeroline=False)
-    fig.update_layout(legend=dict(x=lx, y=ly, xanchor=lxa, yanchor=lya, bgcolor='rgba(255, 255, 255, 0.9)', bordercolor='black', borderwidth=1 if is_scientific else 0, font=dict(size=14, color="black" if is_scientific else None)))
+        fig.update_xaxes(
+            showgrid=False, showline=True, linecolor='black', linewidth=2, 
+            mirror="all", ticks='inside', tickcolor='black', tickwidth=2, ticklen=8, 
+            title_font=dict(size=24, family="Arial, sans-serif", color="black"), 
+            tickfont=dict(size=18, family="Arial, sans-serif", color="black"), 
+            zeroline=False
+        )
+        fig.update_yaxes(
+            showgrid=False, showline=True, linecolor='black', linewidth=2, 
+            mirror="all", ticks='inside', tickcolor='black', tickwidth=2, ticklen=8, 
+            title_font=dict(size=24, family="Arial, sans-serif", color="black"), 
+            tickfont=dict(size=18, family="Arial, sans-serif", color="black"), 
+            zeroline=False
+        )
+    fig.update_layout(
+        legend=dict(
+            x=lx, y=ly, xanchor=lxa, yanchor=lya, 
+            bgcolor='rgba(255, 255, 255, 0.9)', bordercolor='black', 
+            borderwidth=1 if is_scientific else 0, 
+            font=dict(size=18, color="black" if is_scientific else None)
+        )
+    )
     return fig
 
 # ============================================================
@@ -687,7 +720,6 @@ def parse_gamry_dta_multi_curve(raw: str) -> Tuple[Dict[str, str], List[Tuple[st
                 elif cu in ["ZIMAG", "Z''"]: col_map[c] = "neg_Z_imag"
                 elif cu in ["T", "TIME"]: col_map[c] = "Time"
             df = df.rename(columns=col_map)
-            # Remove duplicated columns if they exist (commonly Gamry outputs two Vf or two Im columns in different structures)
             df = df.loc[:, ~df.columns.duplicated()]
 
             if "neg_Z_imag" in df.columns and any("Zimag" in c for c in cols):
@@ -698,7 +730,6 @@ def parse_gamry_dta_multi_curve(raw: str) -> Tuple[Dict[str, str], List[Tuple[st
         else:
             i += 1
             
-    # Mejorando drásticamente el detector de técnicas con un string que concatena variables útiles de Gamry.
     method_clues = (meta.get("METHOD", "") + " " + meta.get("TAG", "") + " " + meta.get("TITLE", "") + " " + meta.get("EXPLAIN", "")).upper()
     if "IMP" in method_clues or "EIS" in method_clues or (curves and "Frequency" in curves[0][1].columns):
         meta["TECHNIQUE"] = "Electrochemical Impedance Spectroscopy (EIS)"
@@ -1349,6 +1380,9 @@ if uploaded_files:
                     st.plotly_chart(fig_super, use_container_width=True, config=dl_config)
                 elif is_sg_medusa:
                     fig_super.update_layout(title="Chemical Speciation" if not scientific_style else "", xaxis_title="pH", yaxis_title=y_axis_label_medusa, height=500)
+                    if crop_medusa:
+                        fig_super.update_xaxes(range=[medusa_xmin, medusa_xmax])
+                        fig_super.update_yaxes(range=[medusa_ymin, medusa_ymax])
                     fig_super = apply_scientific_style(fig_super, scientific_style, lx, ly, lxa, lya)
                     st.plotly_chart(fig_super, use_container_width=True, config=dl_config)
                 else:
@@ -1383,7 +1417,6 @@ if uploaded_files:
                         fig_cdl = go.Figure()
                         
                         if len(df_cv_clean) > 1:
-                            # MODIFICACIÓN CLAVE: Ajuste forzado por el origen (0,0) para C_dl
                             def fit_cdl(v, c): return c * v
                             try:
                                 popt_cdl, _ = curve_fit(fit_cdl, df_cv_clean["v (V/s)"], df_cv_clean["delta_j_half"])
@@ -1620,6 +1653,9 @@ if uploaded_files:
         fig.update_layout(title=title_txt, xaxis_title=x_title, yaxis_title=y_title, height=500)
         
         if is_eis: fig.update_yaxes(scaleanchor="x", scaleratio=1)
+        if is_medusa and crop_medusa:
+            fig.update_xaxes(range=[medusa_xmin, medusa_xmax])
+            fig.update_yaxes(range=[medusa_ymin, medusa_ymax])
             
         fig = apply_scientific_style(fig, scientific_style, lx, ly, lxa, lya)
         st.plotly_chart(fig, use_container_width=True, config=dl_config)
