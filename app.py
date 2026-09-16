@@ -687,6 +687,8 @@ def parse_gamry_dta_multi_curve(raw: str) -> Tuple[Dict[str, str], List[Tuple[st
                 elif cu in ["ZIMAG", "Z''"]: col_map[c] = "neg_Z_imag"
                 elif cu in ["T", "TIME"]: col_map[c] = "Time"
             df = df.rename(columns=col_map)
+            # Remove duplicated columns if they exist (commonly Gamry outputs two Vf or two Im columns in different structures)
+            df = df.loc[:, ~df.columns.duplicated()]
 
             if "neg_Z_imag" in df.columns and any("Zimag" in c for c in cols):
                 df["neg_Z_imag"] = -df["neg_Z_imag"]
@@ -696,14 +698,15 @@ def parse_gamry_dta_multi_curve(raw: str) -> Tuple[Dict[str, str], List[Tuple[st
         else:
             i += 1
             
-    method = meta.get("METHOD", "").upper()
-    if "IMP" in method or "EIS" in method or (curves and "Frequency" in curves[0][1].columns):
+    # Mejorando drásticamente el detector de técnicas con un string que concatena variables útiles de Gamry.
+    method_clues = (meta.get("METHOD", "") + " " + meta.get("TAG", "") + " " + meta.get("TITLE", "") + " " + meta.get("EXPLAIN", "")).upper()
+    if "IMP" in method_clues or "EIS" in method_clues or (curves and "Frequency" in curves[0][1].columns):
         meta["TECHNIQUE"] = "Electrochemical Impedance Spectroscopy (EIS)"
-    elif "CP" in method or "CHRONOP" in method or (curves and "Time" in curves[0][1].columns and "Im" not in curves[0][1].columns):
+    elif "CP" in method_clues or "CHRONOP" in method_clues or (curves and "Time" in curves[0][1].columns and "Im" not in curves[0][1].columns):
         meta["TECHNIQUE"] = "Chronopotentiometry (CP)"
-    elif "CV" in method or "CYCLIC" in method:
+    elif "CV" in method_clues or "CYCLIC" in method_clues:
         meta["TECHNIQUE"] = "Cyclic Voltammetry (CV)"
-    elif "LSV" in method or "LINEAR" in method:
+    elif "LSV" in method_clues or "LINEAR" in method_clues:
         meta["TECHNIQUE"] = "Linear Sweep Voltammetry (LSV)"
         
     return meta, curves
@@ -775,6 +778,7 @@ def parse_biologic_mpt(raw: str):
         elif "im(z)" in cl or "z''" in cl: col_map[c] = "z_imag"
         elif "time" in cl or "t/s" in cl: col_map[c] = "Time"
     df = df.rename(columns=col_map)
+    df = df.loc[:, ~df.columns.duplicated()]
     
     if "z_imag" in df.columns and "neg_Z_imag" not in df.columns:
         df["neg_Z_imag"] = -df["z_imag"]
@@ -1046,14 +1050,16 @@ if uploaded_files:
             for cid, df_comp in curves_comp:
                 if "EIS" in tech_sg:
                     if "Z_real" in df_comp.columns and "neg_Z_imag" in df_comp.columns:
-                        dd_comp = df_comp[["Z_real", "neg_Z_imag", "Frequency"]].replace([np.inf, -np.inf], np.nan).dropna().copy()
+                        _df = df_comp.loc[:, ~df_comp.columns.duplicated()]
+                        dd_comp = _df[["Z_real", "neg_Z_imag", "Frequency"]].replace([np.inf, -np.inf], np.nan).dropna().copy()
                         dd_comp.columns = ["x", "y", "f"]
                         if crop_eis:
                             dd_comp = dd_comp[(dd_comp["f"] >= eis_min_f) & (dd_comp["f"] <= eis_max_f)]
                         if len(dd_comp) >= 5: processed_curves.append((cid, dd_comp))
                 elif "CP" in tech_sg or "Chronopotentiometry" in tech_sg:
                     if "Time" in df_comp.columns and "Vf" in df_comp.columns:
-                        dd_comp = df_comp[["Time", "Vf"]].replace([np.inf, -np.inf], np.nan).dropna().copy()
+                        _df = df_comp.loc[:, ~df_comp.columns.duplicated()]
+                        dd_comp = _df[["Time", "Vf"]].replace([np.inf, -np.inf], np.nan).dropna().copy()
                         if convert_to_rhe: dd_comp["Vf"] = dd_comp["Vf"] + e0_ref + (0.0591 * ph_val)
                         dd_comp.columns = ["x", "y"]
                         if len(dd_comp) >= 2: processed_curves.append((cid, dd_comp))
@@ -1062,7 +1068,8 @@ if uploaded_files:
                 else:
                     Ecol = "Vf" if "Vf" in df_comp.columns else ("Vu" if "Vu" in df_comp.columns else None)
                     if Ecol and "Im" in df_comp.columns:
-                        dd_comp = df_comp[[Ecol, "Im"]].replace([np.inf, -np.inf], np.nan).dropna().copy()
+                        _df = df_comp.loc[:, ~df_comp.columns.duplicated()]
+                        dd_comp = _df[[Ecol, "Im"]].replace([np.inf, -np.inf], np.nan).dropna().copy()
                         if apply_ir: dd_comp[Ecol] = dd_comp[Ecol] - dd_comp["Im"] * ru_ohms * (comp_percent / 100.0)
                         if convert_to_rhe: dd_comp[Ecol] = dd_comp[Ecol] + e0_ref + (0.0591 * ph_val)
                         dd_comp.columns = ["x", "y"]
@@ -1485,14 +1492,16 @@ if uploaded_files:
         for i, (cid, dfi) in enumerate(curves):
             if is_eis:
                 if "Z_real" in dfi.columns and "neg_Z_imag" in dfi.columns:
-                    dd = dfi[["Z_real", "neg_Z_imag", "Frequency"]].replace([np.inf, -np.inf], np.nan).dropna().copy()
+                    _dfi = dfi.loc[:, ~dfi.columns.duplicated()]
+                    dd = _dfi[["Z_real", "neg_Z_imag", "Frequency"]].replace([np.inf, -np.inf], np.nan).dropna().copy()
                     dd.columns = ["x", "y", "f"]
                     if crop_eis:
                         dd = dd[(dd["f"] >= eis_min_f) & (dd["f"] <= eis_max_f)]
                     if len(dd) >= 5: processed_curves.append((cid, dd))
             elif is_cp:
                 if "Time" in dfi.columns and "Vf" in dfi.columns:
-                    dd = dfi[["Time", "Vf"]].replace([np.inf, -np.inf], np.nan).dropna().copy()
+                    _dfi = dfi.loc[:, ~dfi.columns.duplicated()]
+                    dd = _dfi[["Time", "Vf"]].replace([np.inf, -np.inf], np.nan).dropna().copy()
                     if convert_to_rhe: dd["Vf"] = dd["Vf"] + e0_ref + (0.0591 * ph_val)
                     dd.columns = ["x", "y"]
                     if len(dd) >= 2: processed_curves.append((cid, dd))
@@ -1502,7 +1511,8 @@ if uploaded_files:
             else:
                 Ecol = "Vf" if "Vf" in dfi.columns else ("Vu" if "Vu" in dfi.columns else None)
                 if Ecol is None or "Im" not in dfi.columns: continue
-                dd = dfi[[Ecol, "Im"]].replace([np.inf, -np.inf], np.nan).dropna().copy()
+                _dfi = dfi.loc[:, ~dfi.columns.duplicated()]
+                dd = _dfi[[Ecol, "Im"]].replace([np.inf, -np.inf], np.nan).dropna().copy()
                 if apply_ir: dd[Ecol] = dd[Ecol] - dd["Im"] * ru_ohms * (comp_percent / 100.0)
                 if convert_to_rhe: dd[Ecol] = dd[Ecol] + e0_ref + (0.0591 * ph_val)
                 dd.columns = ["x", "y"]
