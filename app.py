@@ -163,7 +163,11 @@ j_axis_label = "I/mA·cm⁻²" if scientific_style else "Current Density j (mA/c
 
 publication_palette = ['#000000', '#E41A1C', '#377EB8', '#4DAF4A', '#984EA3', '#FF7F00', '#A65628', '#F781BF'] + px.colors.qualitative.Alphabet
 combined_palette = publication_palette
+
+# Configuraciones de exportación fotográfica
 dl_config = {'toImageButtonOptions': {'format': 'png', 'filename': 'electrochem_plot', 'height': 720, 'width': 960, 'scale': 4}}
+# Nuevo config de exportación HD en proporción cuadrada (ancho compesa los 20px extra de margen)
+dl_config_square = {'toImageButtonOptions': {'format': 'png', 'filename': 'eis_square_plot', 'height': 800, 'width': 820, 'scale': 4}}
 
 
 # ============================================================
@@ -1179,7 +1183,6 @@ if uploaded_files:
                 sg_max_log_I = -10
                 y_axis_label_medusa = "Fraction"
                 
-                # Para rastrear los máximos y forzar cuadrados en EIS
                 sg_min_z, sg_max_z = 0.0, 1.0 
                 
                 for g_idx, g_name in enumerate(selected_groups):
@@ -1349,22 +1352,23 @@ if uploaded_files:
                     axis_min = sg_min_z * 1.05 if sg_min_z < 0 else 0.0
                     axis_max = sg_max_z * 1.05
                     
-                    fig_super.update_layout(title="Nyquist Plot", xaxis_title="Z' (Ω)", yaxis_title="-Z'' (Ω)", height=650)
+                    # Geometría estricta de 620x600 compensando los márgenes de apply_scientific_style (120px ancho, 100px alto)
+                    # El área interna quedará exactamente en 500x500 píxeles.
+                    fig_super.update_layout(title="Nyquist Plot", xaxis_title="Z' (Ω)", yaxis_title="-Z'' (Ω)", width=620, height=600)
                     fig_super.update_xaxes(range=[axis_min, axis_max], constrain="domain")
                     fig_super.update_yaxes(range=[axis_min, axis_max], scaleanchor="x", scaleratio=1, constrain="domain")
-                    
                     fig_super = apply_scientific_style(fig_super, scientific_style, lx, ly, lxa, lya)
-                    st.plotly_chart(fig_super, use_container_width=True, config=dl_config)
+                    st.plotly_chart(fig_super, use_container_width=False, config=dl_config_square)
                     
                     c1, c2 = st.columns(2)
                     with c1:
-                        fig_bode_mod.update_layout(title="Bode Plot (|Z|)", xaxis_title="Frequency f (Hz)", yaxis_title="|Z| (Ω)", xaxis_type="log", yaxis_type="log", height=450)
+                        fig_bode_mod.update_layout(title="Bode Plot (|Z|)", xaxis_title="Frequency f (Hz)", yaxis_title="|Z| (Ω)", xaxis_type="log", yaxis_type="log", width=620, height=600)
                         fig_bode_mod = apply_scientific_style(fig_bode_mod, scientific_style, lx, ly, lxa, lya)
-                        st.plotly_chart(fig_bode_mod, use_container_width=True, config=dl_config)
+                        st.plotly_chart(fig_bode_mod, use_container_width=False, config=dl_config_square)
                     with c2:
-                        fig_bode_phase.update_layout(title="Bode Plot (Phase)", xaxis_title="Frequency f (Hz)", yaxis_title="-Phase (°)", xaxis_type="log", height=450)
+                        fig_bode_phase.update_layout(title="Bode Plot (Phase)", xaxis_title="Frequency f (Hz)", yaxis_title="-Phase (°)", xaxis_type="log", width=620, height=600)
                         fig_bode_phase = apply_scientific_style(fig_bode_phase, scientific_style, lx, ly, lxa, lya)
-                        st.plotly_chart(fig_bode_phase, use_container_width=True, config=dl_config)
+                        st.plotly_chart(fig_bode_phase, use_container_width=False, config=dl_config_square)
                         
                     if fit_eis_model_toggle and sg_eis_params:
                         st.markdown(f"#### ⚡ Equivalent Circuit Fit Results")
@@ -1572,7 +1576,6 @@ if uploaded_files:
         fig, fig_tafel, fig_jeta = go.Figure(), go.Figure(), go.Figure()
         results_list, lsv_cat_list, max_log_I_ind = [], [], -10
         
-        # Para rastrear los máximos de EIS individual
         ind_min_z, ind_max_z = 0.0, 1.0
 
         avg_cycles = st.toggle(f"🌟 Average {len(processed_curves)} Cycles/Scans", key=f"avg_{file.name}") if len(processed_curves) > 1 and not is_medusa else False
@@ -1664,7 +1667,6 @@ if uploaded_files:
         if is_eis:
             x_title = "Z' (Ω)"
             y_title = "-Z'' (Ω)"
-            # Definir límites cuadrados
             axis_min = ind_min_z * 1.05 if ind_min_z < 0 else 0.0
             axis_max = ind_max_z * 1.05
         elif is_cp:
@@ -1679,19 +1681,24 @@ if uploaded_files:
             
         title_txt = "Nyquist Plot" if is_eis else "Galvanostatic Charge-Discharge" if is_cp else "Chemical Speciation" if is_medusa else "Raw Data" if not scientific_style else ""
         
-        # Aumentamos la altura de los diagramas de EIS a 650 para que el cuadrado se vea bien proporcionado
-        fig.update_layout(title=title_txt, xaxis_title=x_title, yaxis_title=y_title, height=650 if is_eis else 500)
-        
-        if is_eis: 
+        # Geometría estricta también en Individual Analysis
+        if is_eis:
+            fig.update_layout(title=title_txt, xaxis_title=x_title, yaxis_title=y_title, width=620, height=600)
             fig.update_xaxes(range=[axis_min, axis_max], constrain="domain")
             fig.update_yaxes(range=[axis_min, axis_max], scaleanchor="x", scaleratio=1, constrain="domain")
+        else:
+            fig.update_layout(title=title_txt, xaxis_title=x_title, yaxis_title=y_title, height=500)
             
         if is_medusa and crop_medusa:
             fig.update_xaxes(range=[medusa_xmin, medusa_xmax])
             fig.update_yaxes(range=[medusa_ymin, medusa_ymax])
             
         fig = apply_scientific_style(fig, scientific_style, lx, ly, lxa, lya)
-        st.plotly_chart(fig, use_container_width=True, config=dl_config)
+        
+        if is_eis:
+            st.plotly_chart(fig, use_container_width=False, config=dl_config_square)
+        else:
+            st.plotly_chart(fig, use_container_width=True, config=dl_config)
         
         if "LSV" in technique and lsv_cat_list and not is_eis and not is_cp and not is_medusa:
             c1, c2 = st.columns(2)
