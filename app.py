@@ -37,14 +37,14 @@ with st.popover("📖 View Calculation Methods & Algorithms"):
     *   **ECSA-Normalized Kinetics:** Automatically corrects peak current densities ($j_{p, ECSA}$) based on calculated RF.
 
     **3. Catalytic Parameter Extraction (LSV)**
-    *   **Onset Potential ($E_{onset}$):** Point where $|I|$ reaches 5% of the absolute maximum current.
+    *   **Onset Potential ($E_{onset}$):** Point where $\vert{}I\vert{}$ reaches 5% of the absolute maximum current.
     *   **Robust Tafel Slope:** Computed using a dynamic Sliding Window algorithm, maximizing $R^2$.
 
     **4. Scan Rate Kinetics ($b$-value)**
     *   A linear regression of $\\log_{10}(j_{pa})$ vs $\\log_{10}(v)$ calculates the slope $b$.
     
     **5. Electrochemical Impedance Spectroscopy (EIS)**
-    *   **Equivalent Circuit Fitting:** Applies Non-Linear Least Squares (CNLS) with **Modulus Weighting** ($\\sigma = |Z|$). Generates high-density synthetic curves.
+    *   **Equivalent Circuit Fitting:** Applies Non-Linear Least Squares (CNLS) with **Modulus Weighting** ($\\sigma = \vert{}Z\vert{}$). Generates high-density synthetic curves.
     *   **Effective Capacitance ($C_{eff}$):** Converts CPE to true capacitance using $C_{eff} = Q^{1/n} \cdot R^{(1-n)/n}$.
     *   **Polarization Sensitivity:** Calculates $R_{ct}$ ratios to evaluate potential-dependent activity.
     
@@ -1179,6 +1179,9 @@ if uploaded_files:
                 sg_max_log_I = -10
                 y_axis_label_medusa = "Fraction"
                 
+                # Para rastrear los máximos y forzar cuadrados en EIS
+                sg_min_z, sg_max_z = 0.0, 1.0 
+                
                 for g_idx, g_name in enumerate(selected_groups):
                     if g_name not in prepared_group_data: continue
                     g_data = prepared_group_data[g_name]
@@ -1226,6 +1229,10 @@ if uploaded_files:
                         
                         if is_sg_eis:
                             zr, zi, f_hz = tr["x"], tr["y"], tr["f"]
+                            
+                            sg_min_z = min(sg_min_z, np.min(zr), np.min(zi))
+                            sg_max_z = max(sg_max_z, np.max(zr), np.max(zi))
+                            
                             fig_super.add_trace(go.Scatter(x=zr, y=zi, mode='markers', name=tr["name"], marker=dict(color=c_color, size=6)))
                             
                             z_mod = np.sqrt(zr**2 + zi**2)
@@ -1241,6 +1248,10 @@ if uploaded_files:
                                     results_dict["Curve"] = tr["name"]
                                     results_dict["Model"] = selected_model.split(" [")[0] 
                                     sg_eis_params.append(results_dict)
+                                    
+                                    sg_min_z = min(sg_min_z, np.min(zr_sim), np.min(zi_sim))
+                                    sg_max_z = max(sg_max_z, np.max(zr_sim), np.max(zi_sim))
+                                    
                                     fig_super.add_trace(go.Scatter(x=zr_sim, y=zi_sim, mode='lines', name=f"{tr['name']} Model", line=dict(color=c_color, width=2), showlegend=True, hoverinfo='skip'))
                                     z_mod_sim = np.sqrt(zr_sim**2 + zi_sim**2)
                                     phase_sim = np.degrees(np.arctan2(zi_sim, zr_sim))
@@ -1335,8 +1346,13 @@ if uploaded_files:
                                     fig_super_jeta.add_trace(go.Scatter(x=fit_data["eta_mV"], y=fit_data["j_dens"], mode='lines', name=tr["name"], line=dict(color=c_color, width=2.5)))
 
                 if is_sg_eis:
-                    fig_super.update_layout(title="Nyquist Plot", xaxis_title="Z' (Ω)", yaxis_title="-Z'' (Ω)", height=500)
-                    fig_super.update_yaxes(scaleanchor="x", scaleratio=1)
+                    axis_min = sg_min_z * 1.05 if sg_min_z < 0 else 0.0
+                    axis_max = sg_max_z * 1.05
+                    
+                    fig_super.update_layout(title="Nyquist Plot", xaxis_title="Z' (Ω)", yaxis_title="-Z'' (Ω)", height=650)
+                    fig_super.update_xaxes(range=[axis_min, axis_max], constrain="domain")
+                    fig_super.update_yaxes(range=[axis_min, axis_max], scaleanchor="x", scaleratio=1, constrain="domain")
+                    
                     fig_super = apply_scientific_style(fig_super, scientific_style, lx, ly, lxa, lya)
                     st.plotly_chart(fig_super, use_container_width=True, config=dl_config)
                     
@@ -1555,12 +1571,18 @@ if uploaded_files:
 
         fig, fig_tafel, fig_jeta = go.Figure(), go.Figure(), go.Figure()
         results_list, lsv_cat_list, max_log_I_ind = [], [], -10
+        
+        # Para rastrear los máximos de EIS individual
+        ind_min_z, ind_max_z = 0.0, 1.0
 
         avg_cycles = st.toggle(f"🌟 Average {len(processed_curves)} Cycles/Scans", key=f"avg_{file.name}") if len(processed_curves) > 1 and not is_medusa else False
 
         if avg_cycles:
             if is_eis:
                 common_f, zr_mean, zi_mean, zr_std, zi_std = get_averaged_eis_curve(processed_curves)
+                ind_min_z = min(ind_min_z, np.min(zr_mean), np.min(zi_mean))
+                ind_max_z = max(ind_max_z, np.max(zr_mean), np.max(zi_mean))
+                
                 mean_color = combined_palette[0]
                 fig.add_trace(go.Scatter(x=zr_mean, y=zi_mean, mode='markers', name='Average', marker=dict(color=mean_color, size=6)))
             elif is_cp:
@@ -1609,6 +1631,9 @@ if uploaded_files:
             for i, (cid, dd) in enumerate(processed_curves):
                 line_color = combined_palette[i % len(combined_palette)]
                 if is_eis:
+                    ind_min_z = min(ind_min_z, np.min(dd["x"]), np.min(dd["y"]))
+                    ind_max_z = max(ind_max_z, np.max(dd["x"]), np.max(dd["y"]))
+                    
                     fig.add_trace(go.Scatter(x=dd["x"], y=dd["y"], mode='markers', name=cid, marker=dict(color=line_color, size=6)))
                 elif is_cp:
                     fig.add_trace(go.Scatter(x=dd["x"], y=dd["y"], mode='lines', name=cid, line=dict(color=line_color, width=2)))
@@ -1639,6 +1664,9 @@ if uploaded_files:
         if is_eis:
             x_title = "Z' (Ω)"
             y_title = "-Z'' (Ω)"
+            # Definir límites cuadrados
+            axis_min = ind_min_z * 1.05 if ind_min_z < 0 else 0.0
+            axis_max = ind_max_z * 1.05
         elif is_cp:
             x_title = "Time t (s)"
             y_title = x_axis_label
@@ -1650,9 +1678,14 @@ if uploaded_files:
             y_title = j_axis_label
             
         title_txt = "Nyquist Plot" if is_eis else "Galvanostatic Charge-Discharge" if is_cp else "Chemical Speciation" if is_medusa else "Raw Data" if not scientific_style else ""
-        fig.update_layout(title=title_txt, xaxis_title=x_title, yaxis_title=y_title, height=500)
         
-        if is_eis: fig.update_yaxes(scaleanchor="x", scaleratio=1)
+        # Aumentamos la altura de los diagramas de EIS a 650 para que el cuadrado se vea bien proporcionado
+        fig.update_layout(title=title_txt, xaxis_title=x_title, yaxis_title=y_title, height=650 if is_eis else 500)
+        
+        if is_eis: 
+            fig.update_xaxes(range=[axis_min, axis_max], constrain="domain")
+            fig.update_yaxes(range=[axis_min, axis_max], scaleanchor="x", scaleratio=1, constrain="domain")
+            
         if is_medusa and crop_medusa:
             fig.update_xaxes(range=[medusa_xmin, medusa_xmax])
             fig.update_yaxes(range=[medusa_ymin, medusa_ymax])
